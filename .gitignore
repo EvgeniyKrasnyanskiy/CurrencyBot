@@ -1,0 +1,17 @@
+# окружение
+venv/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+
+# конфиги и логи
+.env
+*.lock
+logs/
+data/
+
+# батники
+*.bat
