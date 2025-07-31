@@ -17,6 +17,8 @@ from datetime import datetime
 load_dotenv()
 
 LOCK_FILE = 'currency_bot.lock'
+RESTART_FLAG_FILE = "restart.flag"
+RESTART_BLOCKED_TIME = 660  # 11 минут
 
 if not os.path.exists('logs'):
     os.makedirs('logs')
@@ -70,18 +72,33 @@ def save_users(users):
         json.dump(users, f, indent=4, ensure_ascii=False)
 
 # --- Lock-файл ---
+def is_our_bot(pid):
+    try:
+        proc = psutil.Process(pid)
+        return "currency_bot.py" in ' '.join(proc.cmdline()).lower()
+    except Exception:
+        return False
+
 def create_lock():
+    # Проверка флага перезапуска
+    if os.path.exists(RESTART_FLAG_FILE):
+        age = time.time() - os.path.getmtime(RESTART_FLAG_FILE)
+        if age < RESTART_BLOCKED_TIME:
+            remaining = int(RESTART_BLOCKED_TIME - age)
+            print(f"⏳ Бот недавно завершался. Повторный запуск разрешён через {remaining} сек.")
+            sys.exit(1)
+
     if os.path.exists(LOCK_FILE):
         try:
             with open(LOCK_FILE, 'r') as f:
                 existing_pid = int(f.read().strip())
 
-            if psutil.pid_exists(existing_pid):
-                logger.error(f"Бот уже запущен (PID {existing_pid} активен)")
+            if psutil.pid_exists(existing_pid) and is_our_bot(existing_pid):
+                logger.error(f"Бот уже запущен (PID {existing_pid} — это currency_bot.py)")
                 print("Бот уже запущен.")
                 sys.exit(1)
             else:
-                logger.warning(f"Найден lock-файл с неактивным PID {existing_pid}, перезаписываем")
+                logger.warning(f"Найден lock-файл с неактивным или чужим PID {existing_pid}, перезаписываем")
         except Exception as e:
             logger.warning(f"Ошибка при чтении lock-файла: {e}, перезаписываем")
 
@@ -91,6 +108,10 @@ def create_lock():
 def remove_lock():
     if os.path.exists(LOCK_FILE):
         os.remove(LOCK_FILE)
+
+    # Устанавливаем флаг завершения
+    with open(RESTART_FLAG_FILE, 'w') as f:
+        f.write(datetime.now().isoformat())
 
 def parse_exchange_rate(urls, keywords):
     result_lines = []
@@ -269,14 +290,10 @@ class CurrencyBot:
     def get_cached_rate(self):
         """Получает курс из кеша или парсит заново"""
         now = time.time()
+        
+        # Всегда парсим новый курс, но используем кеш для защиты от частых запросов
         if now - self.last_update_time < self.cache_ttl:
-            logger.info("Возвращаем курс из кеша.")
-            # Обновляем время
-            base_text = self.last_rates.split(' ')
-            if len(base_text) >= 4:
-                new_text = ' '.join(base_text[:-1]) + ' ' + time.strftime("%H:%M", time.localtime())
-                return new_text
-            return self.last_rates
+            logger.info("Кеш еще действителен, но парсим новый курс для обновления.")
         
         text = parse_exchange_rate(self.urls, self.keywords)
         self.last_rates = text
