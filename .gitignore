@@ -2,6 +2,7 @@
 venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # IDE
 .idea/
@@ -13,5 +14,13 @@ __pycache__/
 logs/
 data/
 
-# батники
+# батники (кроме наших скриптов запуска)
 *.bat
+!start_bot.bat
+
+# резервные копии
+backup_*/
+
+# временные файлы
+*.tmp
+*.temp
