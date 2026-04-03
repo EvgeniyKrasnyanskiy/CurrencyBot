@@ -1,3 +1,6 @@
+import sys
+print(sys.version)
+
 import re
 import json
 import requests
@@ -11,6 +14,7 @@ import threading
 from telegram.ext import Filters
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -221,7 +225,9 @@ def parse_exchange_rate(urls, keywords):
         URL_CG = URL_CG.replace("(", "\\(").replace(")", "\\)")
         URL_OKX = URL_OKX.replace("(", "\\(").replace(")", "\\)")
         msg = (
-            f"💵 USDT = ₽{usdt_CG} ([CG]({URL_CG})) и ₽{usdt_OKX} ([OKX]({URL_OKX})) {timestamp}"
+            # f"💵 USDT = ₽{usdt_CG} ([CG]({URL_CG})) и ₽{usdt_OKX} ([OKX]({URL_OKX})) {timestamp}"
+            # f"💵 USDt = ₽{usdt_CG}[¹]({URL_CG}) и ₽{usdt_OKX}[²]({URL_OKX}) в {timestamp}"
+            f"💵 USDt = ₽[{usdt_CG}]({URL_CG}) и ₽[{usdt_OKX}]({URL_OKX}) в {timestamp}"
         )
         return msg
     else:
@@ -258,21 +264,23 @@ class CurrencyBot:
             self.keywords = ["Сейчас USDT = "]
 
             print("Создание Updater...")
-            self.updater = Updater(token=self.token, use_context=True)
-            self.dispatcher = self.updater.dispatcher
+            self._build_updater()
 
             print("Создание потока...")
             self.thread = threading.Thread(target=self.periodic_send)
             self.thread.daemon = False
 
-            print("Назначение обработчиков...")
-            self.setup_handlers()
             print("CurrencyBot успешно инициализирован.")
         except Exception as e:
             print(f"❌ Ошибка в конструкторе CurrencyBot: {e}")
             import traceback
             traceback.print_exc()
             raise
+
+    def _build_updater(self):
+        self.updater = Updater(token=self.token, use_context=True)
+        self.dispatcher = self.updater.dispatcher
+        self.setup_handlers()
 
     def setup_handlers(self):
         if self.dispatcher:
@@ -281,6 +289,61 @@ class CurrencyBot:
             self.dispatcher.add_handler(CommandHandler('setinterval', self.cmd_setinterval, filters=Filters.user(user_id=self.admin_ids)))
             self.dispatcher.add_handler(CommandHandler('users', self.cmd_users, filters=Filters.user(user_id=self.admin_ids)))
             self.dispatcher.add_handler(CommandHandler('help', self.cmd_help))
+            self.dispatcher.add_error_handler(self._on_dispatcher_error)
+
+    def _on_dispatcher_error(self, update, context):
+        err = context.error
+        logger.error("Ошибка в обработчике Telegram: %s", err, exc_info=err)
+
+    @staticmethod
+    def _is_transient_network_error(exc):
+        """Прокси недоступен, обрыв, таймаут — не фатальная ошибка конфигурации."""
+        if isinstance(exc, (NetworkError, TimedOut)):
+            return True
+        if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+            return True
+        try:
+            import requests
+            if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+                return True
+        except Exception:
+            pass
+        chain = []
+        e = exc
+        depth = 0
+        while e is not None and depth < 8:
+            chain.append(e)
+            e = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+            depth += 1
+        for e in chain:
+            if isinstance(e, (ConnectionError, TimeoutError, OSError)):
+                return True
+            name = type(e).__name__
+            if any(x in name for x in ("Connection", "Timeout", "Proxy", "Protocol", "HTTP")):
+                return True
+            msg = str(e).lower()
+            if any(
+                x in msg
+                for x in (
+                    "connection",
+                    "timed out",
+                    "timeout",
+                    "proxy",
+                    "refused",
+                    "unreachable",
+                    "network is unreachable",
+                    "name or service not known",
+                    "getaddrinfo failed",
+                )
+            ):
+                return True
+        return False
+
+    def _stop_updater_safe(self):
+        try:
+            self.updater.stop()
+        except Exception as e:
+            logger.debug("stop() updater: %s", e)
 
     def create_keyboard(self):
         """Создает клавиатуру с кнопкой 'Обмен'"""
@@ -474,10 +537,44 @@ class CurrencyBot:
         self.thread.start()
         logger.info("🔁 Поток обновления запущен.")
 
-        self.updater.start_polling()
-        logger.info("📡 Бот начал polling.")
-        self.updater.idle()
-        logger.info("🛑 polling завершён.")
+        initial = float(os.getenv("RECONNECT_INITIAL_SEC", "15"))
+        max_backoff = float(os.getenv("RECONNECT_MAX_SEC", "600"))
+        backoff = initial
+
+        while True:
+            try:
+                self.updater.start_polling()
+                logger.info("📡 Бот начал polling.")
+                backoff = initial
+                self.updater.idle()
+                logger.info("🛑 polling завершён (idle).")
+                break
+            except KeyboardInterrupt:
+                self._stop_updater_safe()
+                raise
+            except RetryAfter as e:
+                wait = max(1, int(getattr(e, "retry_after", 5)))
+                logger.warning("Telegram RetryAfter: ждём %s сек.", wait)
+                self._stop_updater_safe()
+                time.sleep(wait)
+                self._rebuild_updater()
+            except Exception as e:
+                if not self._is_transient_network_error(e):
+                    self._stop_updater_safe()
+                    raise
+                logger.warning(
+                    "Сеть/прокси недоступны (%s). Повтор через %.0f сек.",
+                    e,
+                    backoff,
+                )
+                self._stop_updater_safe()
+                time.sleep(backoff)
+                backoff = min(backoff * 1.5, max_backoff)
+                self._rebuild_updater()
+
+    def _rebuild_updater(self):
+        logger.info("Пересоздание Updater и переподключение к Telegram…")
+        self._build_updater()
 
 if __name__ == '__main__':
     print("📦 Запуск CurrencyBot...")
