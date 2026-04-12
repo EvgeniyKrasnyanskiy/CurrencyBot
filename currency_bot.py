@@ -20,6 +20,26 @@ from datetime import datetime
 
 load_dotenv()
 
+
+# --- НАСТРОЙКА ПРОКСИ V2RAYN (SOCKS5) ---
+PROXY_HOST = "127.0.0.1"
+PROXY_PORT = 10808  # Твой рабочий порт
+
+# Настройка для библиотеки Telegram (Updater)
+# Используем socks5h (буква h важна — она передает DNS-запросы через прокси)
+REQUEST_KWARGS = {
+    'proxy_url': 'http://127.0.0.1:10808/',
+    'connect_timeout': 30, # Даем больше времени на установку связи
+    'read_timeout': 30,    # Даем больше времени на получение данных
+}
+
+# Настройка для запросов курса (requests) - меняем socks5h на http
+PROXY_DICT = {
+    "http": f"http://{PROXY_HOST}:{PROXY_PORT}",
+    "https": f"http://{PROXY_HOST}:{PROXY_PORT}"
+}
+
+
 LOCK_FILE = 'currency_bot.lock'
 RESTART_FLAG_FILE = "restart.flag"
 RESTART_BLOCKED_TIME = 660  # 11 минут
@@ -51,7 +71,7 @@ def load_env_config():
         'topic_id': os.getenv('TOPIC_ID'),
         'admins': admins,
         'sleep_time': int(os.getenv('SLEEP_TIME', '600')),
-        'cache_ttl': int(os.getenv('CACHE_TTL', '300'))
+        'cache_ttl': int(os.getenv('CACHE_TTL', '600'))
     }
 
     if not config['token']:
@@ -125,7 +145,8 @@ def parse_exchange_rate(urls, keywords):
 
     for url in urls:
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            # Найди эту строку в функции parse_exchange_rate:
+            response = requests.get(url, headers=headers, timeout=20, proxies=PROXY_DICT) # Добавь proxies=PROXY_DICT   
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "")
             domain = url.split("//")[1].split("/")[0]
@@ -221,19 +242,25 @@ def parse_exchange_rate(urls, keywords):
 
     timestamp = time.strftime("%H:%M", time.localtime())
 
+    # --- ФИНАЛЬНЫЙ БЛОК ФОРМИРОВАНИЯ СООБЩЕНИЯ ---
     if usdt_CG and usdt_OKX:
-        URL_CG = URL_CG.replace("(", "\\(").replace(")", "\\)")
-        URL_OKX = URL_OKX.replace("(", "\\(").replace(")", "\\)")
-        msg = (
-            # f"💵 USDT = ₽{usdt_CG} ([CG]({URL_CG})) и ₽{usdt_OKX} ([OKX]({URL_OKX})) {timestamp}"
-            # f"💵 USDt = ₽{usdt_CG}[¹]({URL_CG}) и ₽{usdt_OKX}[²]({URL_OKX}) в {timestamp}"
-            f"💵 USDt = ₽[{usdt_CG}]({URL_CG}) и ₽[{usdt_OKX}]({URL_OKX}) в {timestamp}"
-        )
+        # Экранируем скобки в URL для Markdown V1
+        safe_URL_CG = URL_CG.replace("(", "\\(").replace(")", "\\)")
+        safe_URL_OKX = URL_OKX.replace("(", "\\(").replace(")", "\\)")
+        
+        # Формируем красивое сообщение со ссылками
+        msg = f"💵 USDt = ₽[{usdt_CG}]({safe_URL_CG}) и ₽[{usdt_OKX}]({safe_URL_OKX}) в {timestamp}"
         return msg
     else:
-        result_lines.append(timestamp)
-        return "\n".join(result_lines)
-
+        # Если хотя бы один курс не получен, отдаем текстовый отчет без ссылок
+        # Это предотвратит ошибку "Can't parse entities"
+        clean_lines = []
+        for line in result_lines:
+            # Убираем символы разметки из логов ошибок, если они там есть
+            clean_line = line.replace('[', '').replace(']', '').replace('(', '').replace(')', '')
+            clean_lines.append(clean_line)
+            
+        return "⚠️ Ошибка получения курса\n" + "\n".join(clean_lines) + f"\n🕒 {timestamp}"
 
 # --- Функция парсинга курса ---
 # ОСТАВЛЕНА БЕЗ ИЗМЕНЕНИЙ (можно использовать как есть)
@@ -277,10 +304,20 @@ class CurrencyBot:
             traceback.print_exc()
             raise
 
+    # def _build_updater(self):
+        # self.updater = Updater(token=self.token, use_context=True)
+        # self.dispatcher = self.updater.dispatcher
+        # self.setup_handlers()
+        
     def _build_updater(self):
-        self.updater = Updater(token=self.token, use_context=True)
+        # Добавляем request_kwargs, чтобы Telegram шел через прокси v2rayN
+        self.updater = Updater(
+            token=self.token, 
+            use_context=True, 
+            request_kwargs=REQUEST_KWARGS
+        )
         self.dispatcher = self.updater.dispatcher
-        self.setup_handlers()
+        self.setup_handlers()    
 
     def setup_handlers(self):
         if self.dispatcher:
@@ -351,13 +388,15 @@ class CurrencyBot:
         return InlineKeyboardMarkup(keyboard)
 
     def get_cached_rate(self):
-        """Получает курс из кеша или парсит заново"""
         now = time.time()
         
-        # Всегда парсим новый курс, но используем кеш для защиты от частых запросов
-        if now - self.last_update_time < self.cache_ttl:
-            logger.info("Кеш еще действителен, но парсим новый курс для обновления.")
+        # Если прошло меньше 5 минут (cache_ttl) и у нас есть старый курс — отдаем его
+        if self.last_rates and (now - self.last_update_time < self.cache_ttl):
+            logger.info("Используем курс из кеша, чтобы не злить сервера.")
+            return self.last_rates
         
+        # Если кеш протух — только тогда идем в сеть
+        logger.info("Кеш истек, запрашиваем новый курс...")
         text = parse_exchange_rate(self.urls, self.keywords)
         self.last_rates = text
         self.last_update_time = now
