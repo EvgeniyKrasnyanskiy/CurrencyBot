@@ -1,499 +1,368 @@
+import os
 import re
 import json
-import requests
-import logging
-import os
-from bs4 import BeautifulSoup
-import sys
 import time
-import psutil
+import logging
 import threading
-from telegram.ext import Filters
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext
-from dotenv import load_dotenv
+import psutil
+import sys
+import requests
 from datetime import datetime
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackContext, Filters
+from telegram.error import NetworkError, RetryAfter, TimedOut
 
 load_dotenv()
 
+# --- CONFIG & PROXY ---
+PROXY_HOST = "127.0.0.1"
+PROXY_PORT = 10808
+REQUEST_KWARGS = {'proxy_url': f'http://{PROXY_HOST}:{PROXY_PORT}/', 'connect_timeout': 30, 'read_timeout': 30}
+PROXY_DICT = {"http": f"http://{PROXY_HOST}:{PROXY_PORT}", "https": f"http://{PROXY_HOST}:{PROXY_PORT}"}
+
 LOCK_FILE = 'currency_bot.lock'
-RESTART_FLAG_FILE = "restart.flag"
-RESTART_BLOCKED_TIME = 660  # 11 минут
 
-if not os.path.exists('logs'):
-    os.makedirs('logs')
-LOG_FILE = os.path.join('logs', 'currency_bot.log')
+# Константы для алертов
+ALERT_INTERVALS = {
+    "1ч": 3600,
+    "4ч": 14400,
+    "6ч": 21600,
+    "12ч": 43200,
+    "24ч": 86400
+}
+ALERT_THRESHOLDS = {
+    "1ч": 2.0,
+    "4ч": 3.0,
+    "6ч": 4.0,
+    "12ч": 5.0,
+    "24ч": 6.0
+}
 
-logging.basicConfig(
-    filename=LOG_FILE,
-    filemode='a',
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    encoding='utf-8'
-)
+# Logging
+if not os.path.exists('logs'): os.makedirs('logs')
+logging.basicConfig(filename=os.path.join('logs', 'currency_bot.log'), level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s', encoding='utf-8')
 logger = logging.getLogger(__name__)
 
+# --- UTILS ---
 def load_env_config():
-    admins_str = os.getenv('ADMINS', '[]')
-    try:
-        admins = json.loads(admins_str)
-    except json.JSONDecodeError:
-        print(f"Ошибка в формате ADMINS: {admins_str}")
-        admins = []
-
+    admins = json.loads(os.getenv('ADMINS', '[]'))
     config = {
         'token': os.getenv('BOT_TOKEN'),
         'channel_id': os.getenv('CHANNEL_ID'),
         'topic_id': os.getenv('TOPIC_ID'),
         'admins': admins,
         'sleep_time': int(os.getenv('SLEEP_TIME', '600')),
-        'cache_ttl': int(os.getenv('CACHE_TTL', '300'))
+        'cache_ttl': int(os.getenv('CACHE_TTL', '600'))
     }
-
-    if not config['token']:
-        raise ValueError("BOT_TOKEN не указан в .env")
-    if not config['channel_id']:
-        raise ValueError("CHANNEL_ID не указан в .env")
-
+    if not config['token'] or not config['channel_id']:
+        raise ValueError("BOT_TOKEN или CHANNEL_ID не настроены в .env")
     return config
 
-# --- Загрузка/сохранение пользователей ---
 def load_users():
-    users_file = 'data/users.json'
-    if not os.path.exists(users_file):
+    if not os.path.exists('data/users.json'): return {}
+    try:
+        with open('data/users.json', 'r', encoding='utf-8-sig') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
         return {}
-    with open(users_file, 'r', encoding='utf-8-sig') as f:
-        return json.load(f)
 
 def save_users(users):
-    users_file = 'data/users.json'
     os.makedirs('data', exist_ok=True)
-    with open(users_file, 'w', encoding='utf-8-sig') as f:
+    with open('data/users.json', 'w', encoding='utf-8-sig') as f:
         json.dump(users, f, indent=4, ensure_ascii=False)
 
-# --- Lock-файл ---
-def is_our_bot(pid):
+def load_bot_state():
+    if not os.path.exists('data/bot_state.json'): return {"last_message_id": None}
     try:
-        proc = psutil.Process(pid)
-        return "currency_bot.py" in ' '.join(proc.cmdline()).lower()
-    except Exception:
-        return False
+        with open('data/bot_state.json', 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return {"last_message_id": None}
+
+def save_bot_state(message_id):
+    os.makedirs('data', exist_ok=True)
+    with open('data/bot_state.json', 'w') as f:
+        json.dump({"last_message_id": message_id}, f)
+
+
+# --- КОРНЕВАЯ ЛОГИКА КУРСОВ ---
+def get_all_rates(history_r, history_c):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    url_link_cg = "https://www.coingecko.com/en/coins/tether/rub"
+    url_link_rapira = "https://rapira.net/exchange/USDT_RUB"
+
+    now_dt = datetime.now()
+    timestamp = now_dt.strftime("%H:%M")
+    date_str = now_dt.strftime("%d.%m")
+
+    # Начало текущих суток для расчета % за день
+    start_of_day = datetime(now_dt.year, now_dt.month, now_dt.day).timestamp()
+
+    usdt_CG_val, usdt_Rapira_val = None, None
+    res_r, res_c = "???", "???"
+    day_diff_r, day_diff_c = "", ""
+
+    to_time = int(time.time() * 1000)
+    from_time = to_time - (24 * 60 * 60 * 1000)
+
+    # 1. Rapira
+    try:
+        url_rapira = f"https://api.rapira.net/market/history?symbol=USDT/RUB&from={from_time}&to={to_time}&resolution=15"
+        r = requests.get(url_rapira, headers=headers, timeout=10, proxies=PROXY_DICT)
+        data = r.json()
+        if isinstance(data, list) and len(data) > 0:
+            curr_r = float(data[-1][4])
+            usdt_Rapira_val = curr_r
+
+            arrow = ""
+            if history_r:
+                # Стрелка (по сравнению с последним кэшем)
+                prev_r = history_r[-1][1]
+                if curr_r > prev_r:
+                    arrow = " ↑"
+                elif curr_r < prev_r:
+                    arrow = " ↓"
+                else:
+                    arrow = " →"
+
+                # Процент за день (с 00:00)
+                first_today = next((p for t, p in history_r if t >= start_of_day), history_r[0][1])
+                diff_pct = ((curr_r - first_today) / first_today) * 100
+                day_diff_r = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (Rapira)"
+
+            res_r = f"[{curr_r:.2f}{arrow}]({url_link_rapira})"
+    except Exception as e:
+        logger.error(f"Rapira Error: {e}")
+
+    # 2. CoinGecko
+    try:
+        url_cg = "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub"
+        r = requests.get(url_cg, headers=headers, timeout=10, proxies=PROXY_DICT)
+        if r.status_code == 200:
+            curr_c = float(r.json()['tether']['rub'])
+            usdt_CG_val = curr_c
+
+            arrow = ""
+            if history_c:
+                # Стрелка
+                prev_c = history_c[-1][1]
+                if curr_c > prev_c:
+                    arrow = "⬈"
+                elif curr_c < prev_c:
+                    arrow = "⬊"
+                else:
+                    arrow = "→"
+
+                # Процент за день (с 00:00)
+                first_today = next((p for t, p in history_c if t >= start_of_day), history_c[0][1])
+                diff_pct = ((curr_c - first_today) / first_today) * 100
+                day_diff_c = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (CG)"
+
+            res_c = f"[{curr_c:.2f}{arrow}]({url_link_cg})"
+    except Exception as e:
+        logger.error(f"CG Error: {e}")
+
+    # Формируем итоговое сообщение
+    msg = f"💵 USDt = ₽{res_r} | ₽{res_c} \[{timestamp}]"
+
+    if day_diff_r or day_diff_c:
+        msg += f"\n📈 за {date_str}: {day_diff_r} | {day_diff_c}"
+
+    return msg, usdt_Rapira_val, usdt_CG_val
+
+# --- BOT CLASS ---
+class CurrencyBot:
+    def __init__(self):
+        self.config = load_env_config()
+        self.users = load_users()
+        
+        # Загружаем ID сообщения из файла при старте
+        state = load_bot_state()
+        self.bot_message_id = state.get("last_message_id")
+        
+        self.last_rates = ""
+        self.last_update_time = 0
+        self.history_r = []
+        self.history_c = []
+        self.sent_alerts = {}
+        
+        self._build_updater()
+
+    def _build_updater(self):
+        self.updater = Updater(token=self.config['token'], use_context=True, request_kwargs=REQUEST_KWARGS)
+        self._setup_handlers()
+
+    def _setup_handlers(self):
+        dp = self.updater.dispatcher
+        dp.add_handler(CommandHandler('start', self.cmd_start))
+        dp.add_handler(CommandHandler('get_rate', self.cmd_get_rate))
+        dp.add_handler(CommandHandler('help', self.cmd_help))
+        admin_filter = Filters.user(user_id=self.config['admins'])
+        dp.add_handler(CommandHandler('users', self.cmd_users, filters=admin_filter))
+
+    def get_rate_cached(self):
+        now = time.time()
+        if self.last_rates and (now - self.last_update_time < self.config['cache_ttl']):
+            return self.last_rates
+        
+        text, val_r, val_c = get_all_rates(self.history_r, self.history_c)
+        
+        # Обновляем историю если данные получены
+        if val_r:
+            self.history_r.append((now, val_r))
+            self.history_r = [(t, p) for t, p in self.history_r if t > now - 86400]
+        if val_c:
+            self.history_c.append((now, val_c))
+            self.history_c = [(t, p) for t, p in self.history_c if t > now - 86400]
+
+        self.last_rates = text
+        self.last_update_time = now
+        return self.last_rates
+
+    def check_volatility_alerts(self, current_val, history, label):
+        if not history or not current_val: return None
+        now = time.time()
+        triggered = []
+        for period, secs in ALERT_INTERVALS.items():
+            threshold = ALERT_THRESHOLDS[period]
+            target_t = now - secs
+            # Ищем самую старую запись в пределах нужного окна
+            past_entry = next((p for t, p in reversed(history) if t <= target_t), None)
+            if past_entry:
+                diff = ((current_val - past_entry) / past_entry) * 100
+                if abs(diff) >= threshold:
+                    triggered.append(f"• {label} за {period}: *{'+' if diff > 0 else ''}{diff:.2f}%*")
+        return "\n".join(triggered) if triggered else None
+
+    def cmd_start(self, update: Update, context: CallbackContext):
+        uid = str(update.effective_user.id)
+        if uid not in self.users:
+            self.users[uid] = {'username': update.effective_user.username, 'date': datetime.now().isoformat()}
+            save_users(self.users)
+        update.message.reply_text("Бот запущен. Жми /get_rate")
+
+    def cmd_get_rate(self, update: Update, context: CallbackContext):
+        text = self.get_rate_cached()
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("ОБМЕН", url="https://telegra.ph/Obmen-11-06-2")]])
+        update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+
+    def cmd_help(self, update: Update, context: CallbackContext):
+        update.message.reply_text("/get_rate — курс\n/start — старт")
+
+    def cmd_users(self, update: Update, context: CallbackContext):
+        update.message.reply_text(f"Пользователей: {len(self.users)}")
+
+    def periodic_update(self):
+        # Настройки "тишины"
+        alert_cooldown = 3000  # 50 минут в секундах
+        
+        while True:
+            try:
+                # 1. Получаем свежий курс (обновляет историю внутри get_rate_cached)
+                text = self.get_rate_cached()
+                bot = self.updater.bot
+                now = time.time()
+                
+                # 2. Проверка алертов
+                curr_r = self.history_r[-1][1] if self.history_r else None
+                curr_c = self.history_c[-1][1] if self.history_c else None
+                
+                new_alerts = []
+                for label, val, history in [("Rapira", curr_r, self.history_r), ("CoinGecko", curr_c, self.history_c)]:
+                    alert_text = self.check_volatility_alerts(val, history, label)
+                    
+                    if alert_text:
+                        alert_key = f"{label}_{alert_text}"
+                        last_sent = self.sent_alerts.get(alert_key, 0)
+                        if now - last_sent > alert_cooldown:
+                            new_alerts.append(alert_text)
+                            self.sent_alerts[alert_key] = now
+
+                # 3. Отправка алертов (новым сообщением)
+                if new_alerts:
+                    combined_text = "\n".join(new_alerts)
+                    try:
+                        bot.send_message(
+                            chat_id=self.config['channel_id'], 
+                            text=f"🚨 *ВНИМАНИЕ: ВОЛАТИЛЬНОСТЬ!*\n\n{combined_text}", 
+                            parse_mode="Markdown",
+                            message_thread_id=int(self.config['topic_id']) if self.config['topic_id'] else None
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки алерта: {e}")
+
+                self.sent_alerts = {k: v for k, v in self.sent_alerts.items() if now - v < 86400}
+
+                # 4. Обновление закрепленного сообщения
+                if self.config['channel_id']:
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("ОБМЕН", url="https://telegra.ph/Obmen-11-06-2")]])
+                    
+                    if not self.bot_message_id:
+                        # Отправляем новое сообщение
+                        msg = bot.send_message(
+                            chat_id=self.config['channel_id'], 
+                            text=text, 
+                            parse_mode="Markdown", 
+                            reply_markup=kb, 
+                            message_thread_id=int(self.config['topic_id']) if self.config['topic_id'] else None,
+                            disable_web_page_preview=True
+                        )
+                        self.bot_message_id = msg.message_id
+                        save_bot_state(self.bot_message_id) # Запоминаем в файл
+                        try:
+                            bot.pin_chat_message(self.config['channel_id'], self.bot_message_id)
+                        except: pass
+                    else:
+                        # Пытаемся редактировать существующее
+                        try:
+                            bot.edit_message_text(
+                                text=text, 
+                                chat_id=self.config['channel_id'], 
+                                message_id=self.bot_message_id, 
+                                parse_mode="Markdown", 
+                                reply_markup=kb,
+                                disable_web_page_preview=True
+                            )
+                        except Exception as e:
+                            error_msg = str(e)
+                            # Если сообщение не найдено (удалено) — сбрасываем везде
+                            if "Message to edit not found" in error_msg or "Message_id_invalid" in error_msg:
+                                self.bot_message_id = None
+                                save_bot_state(None) # Сбрасываем в файле
+                                logger.warning("Закреп не найден, ID сброшен для пересоздания.")
+                            elif "Message is not modified" not in error_msg:
+                                logger.error(f"Ошибка правки закрепа: {e}")
+
+            except Exception as e:
+                logger.error(f"Критическая ошибка в periodic_update: {e}")
+            
+            time.sleep(self.config['sleep_time'])
+
+    def run(self):
+        threading.Thread(target=self.periodic_update, daemon=True).start()
+        self.updater.start_polling()
+        self.updater.idle()
 
 def create_lock():
-    # Проверка флага перезапуска
-    if os.path.exists(RESTART_FLAG_FILE):
-        age = time.time() - os.path.getmtime(RESTART_FLAG_FILE)
-        if age < RESTART_BLOCKED_TIME:
-            remaining = int(RESTART_BLOCKED_TIME - age)
-            print(f"⏳ Бот недавно завершался. Повторный запуск разрешён через {remaining} сек.")
-            sys.exit(1)
-
     if os.path.exists(LOCK_FILE):
         try:
             with open(LOCK_FILE, 'r') as f:
-                existing_pid = int(f.read().strip())
-
-            if psutil.pid_exists(existing_pid) and is_our_bot(existing_pid):
-                logger.error(f"Бот уже запущен (PID {existing_pid} — это currency_bot.py)")
-                print("Бот уже запущен.")
+                pid = int(f.read().strip())
+            if psutil.pid_exists(pid):
+                print(f"⚠️ Ошибка: Бот уже запущен (PID {pid}).")
                 sys.exit(1)
-            else:
-                logger.warning(f"Найден lock-файл с неактивным или чужим PID {existing_pid}, перезаписываем")
-        except Exception as e:
-            logger.warning(f"Ошибка при чтении lock-файла: {e}, перезаписываем")
-
-    with open(LOCK_FILE, 'w') as f:
-        f.write(str(os.getpid()))
-
-def remove_lock():
-    if os.path.exists(LOCK_FILE):
-        os.remove(LOCK_FILE)
-
-    # Устанавливаем флаг завершения
-    with open(RESTART_FLAG_FILE, 'w') as f:
-        f.write(datetime.now().isoformat())
-
-def parse_exchange_rate(urls, keywords):
-    result_lines = []
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    for url in urls:
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "")
-            domain = url.split("//")[1].split("/")[0]
-            found = False
-
-            # CoinGecko JSON
-            if "application/json" in content_type:
-                data = response.json()
-                if "tether" in data and "rub" in data["tether"]:
-                    rate = data["tether"]["rub"]
-                    result_lines.insert(0, f"🏦 CoinGecko: {rate}₽")
-                else:
-                    result_lines.append(f"⚠️ JSON не содержит курс: {url}")
-                continue
-
-            # HTML парсинг для OKX
-            html = response.text
-            if "okx.com" in domain:
-                okx_patterns = [
-                    r'₽\s*(\d+[.,]?\d*)',
-                    r'(\d+[.,]?\d*)\s*₽',
-                    r'USDT.*?(\d+[.,]?\d*)\s*RUB',
-                    r'RUB.*?(\d+[.,]?\d*)\s*USDT'
-                ]
-
-                found_rates = []
-                for pattern in okx_patterns:
-                    matches = re.findall(pattern, html, re.IGNORECASE)
-                    for match in matches:
-                        try:
-                            number = float(match.replace(",", "."))
-                            if 70 < number < 85:
-                                found_rates.append(number)
-                        except ValueError:
-                            continue
-
-                if found_rates:
-                    best_rate = sum(found_rates) / len(found_rates)
-                    number_str = f"{best_rate:.2f}"
-                    result_lines.insert(0, f"💱 OKX: {number_str}₽")
-                    found = True
-                continue
-
-            # Поиск ключевых слов
-            if not found:
-                for keyword in keywords:
-                    pattern = re.compile(
-                        rf'{re.escape(keyword)}[\s:<>\-/a-zA-Z"\'=]*?(\d+[.,]?\d*)',
-                        re.IGNORECASE
-                    )
-                    match = pattern.search(html)
-                    if match:
-                        rate = match.group(1)
-                        result_lines.append(f"💬 {keyword}: {rate}₽")
-                        found = True
-                        break
-
-            # Fallback поиск по символу ₽
-            if not found and "okx.com" not in domain:
-                soup = BeautifulSoup(html, 'html.parser')
-                candidates = soup.find_all(string=re.compile(r'₽\s*\d+[.,]?\d*'))
-                for s in candidates:
-                    match = re.search(r'₽\s*(\d+[.,]?\d*)', s)
-                    if match:
-                        number = float(match.group(1).replace(",", "."))
-                        if number > 20:
-                            number_str = f"{number:.2f}"
-                            result_lines.insert(0, f"💱 OKX: {number_str}₽")
-                            found = True
-                            break
-
-            if not found:
-                result_lines.append(f"⚠️ Курс не найден: {url}")
-
-        except Exception as e:
-            result_lines.append(f"❌ Ошибка {url}: {e}")
-            logger.warning(f"Ошибка запроса {url}: {e}")
-
-    usdt_CG = None
-    usdt_OKX = None
-    URL_CG = ""
-    URL_OKX = ""
-
-    for line in result_lines:
-        if line.startswith("🏦 CoinGecko:"):
-            match = re.search(r"([\d.]+)", line)
-            usdt_CG = match.group(1) if match else None
-            URL_CG = next((url for url in urls if "coingecko.com" in url), "")
-        elif line.startswith("💱 OKX:"):
-            match = re.search(r"([\d.]+)", line)
-            usdt_OKX = match.group(1) if match else None
-            URL_OKX = next((url for url in urls if "okx.com" in url), "")
-
-    timestamp = time.strftime("%H:%M", time.localtime())
-
-    if usdt_CG and usdt_OKX:
-        URL_CG = URL_CG.replace("(", "\\(").replace(")", "\\)")
-        URL_OKX = URL_OKX.replace("(", "\\(").replace(")", "\\)")
-        msg = (
-            f"💵 USDT = ₽{usdt_CG} ([CG]({URL_CG})) и ₽{usdt_OKX} ([OKX]({URL_OKX})) {timestamp}"
-        )
-        return msg
-    else:
-        result_lines.append(timestamp)
-        return "\n".join(result_lines)
-
-
-# --- Функция парсинга курса ---
-# ОСТАВЛЕНА БЕЗ ИЗМЕНЕНИЙ (можно использовать как есть)
-class CurrencyBot:
-    def __init__(self):
-        try:
-            self.last_rates = ""
-            self.last_update_time = 0
-            self.last_message_id = None
-            self.bot_message_id = None
-
-            print("Загрузка конфигурации...")
-            self.env_config = load_env_config()
-            self.users = load_users()
-            print("Конфигурация загружена.")
-
-            self.token = self.env_config['token']
-            self.channel_id = self.env_config['channel_id']
-            self.topic_id = self.env_config['topic_id']
-            self.admin_ids = self.env_config['admins']
-            self.sleep_time = self.env_config['sleep_time']
-            self.cache_ttl = self.env_config['cache_ttl']
-
-            self.urls = [
-                "https://www.okx.com/ru-eu/convert/usdt-to-rub",
-                "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub"
-            ]
-            self.keywords = ["Сейчас USDT = "]
-
-            print("Создание Updater...")
-            self.updater = Updater(token=self.token, use_context=True)
-            self.dispatcher = self.updater.dispatcher
-
-            print("Создание потока...")
-            self.thread = threading.Thread(target=self.periodic_send)
-            self.thread.daemon = False
-
-            print("Назначение обработчиков...")
-            self.setup_handlers()
-            print("CurrencyBot успешно инициализирован.")
-        except Exception as e:
-            print(f"❌ Ошибка в конструкторе CurrencyBot: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-
-    def setup_handlers(self):
-        if self.dispatcher:
-            self.dispatcher.add_handler(CommandHandler('start', self.cmd_start))
-            self.dispatcher.add_handler(CommandHandler('get_rate', self.cmd_get_rate))
-            self.dispatcher.add_handler(CommandHandler('setinterval', self.cmd_setinterval, filters=Filters.user(user_id=self.admin_ids)))
-            self.dispatcher.add_handler(CommandHandler('users', self.cmd_users, filters=Filters.user(user_id=self.admin_ids)))
-            self.dispatcher.add_handler(CommandHandler('help', self.cmd_help))
-
-    def create_keyboard(self):
-        """Создает клавиатуру с кнопкой 'Обмен'"""
-        keyboard = [[InlineKeyboardButton("ОБМЕН", url="https://telegra.ph/Obmen-11-06-2")]]
-        return InlineKeyboardMarkup(keyboard)
-
-    def get_cached_rate(self):
-        """Получает курс из кеша или парсит заново"""
-        now = time.time()
-        
-        # Всегда парсим новый курс, но используем кеш для защиты от частых запросов
-        if now - self.last_update_time < self.cache_ttl:
-            logger.info("Кеш еще действителен, но парсим новый курс для обновления.")
-        
-        text = parse_exchange_rate(self.urls, self.keywords)
-        self.last_rates = text
-        self.last_update_time = now
-        return text
-
-    def cmd_start(self, update: Update, context: CallbackContext):
-        user = update.effective_user
-        if user:
-            logger.info(f"/start от {user.id} @{user.username}")
-            user_id = str(user.id)
-
-            if user_id not in self.users:
-                self.users[user_id] = {
-                    'id': user.id,
-                    'username': user.username or '',
-                    'first_name': user.first_name or '',
-                    'last_name': user.last_name or '',
-                    'registration_date': datetime.now().isoformat(),
-                    'last_activity': datetime.now().isoformat()
-                }
-                save_users(self.users)
-                logger.info(f"Добавлен новый пользователь: {user_id}")
-            else:
-                self.users[user_id]['last_activity'] = datetime.now().isoformat()
-                self.users[user_id]['username'] = user.username or ''
-                self.users[user_id]['first_name'] = user.first_name or ''
-                self.users[user_id]['last_name'] = user.last_name or ''
-                save_users(self.users)
-
-        update.message.reply_text(
-            "Привет! Для получения курса USDT используй команду /get_rate"
-        )
-
-    def cmd_get_rate(self, update: Update, context: CallbackContext):
-        user = update.effective_user
-        if not user:
-            return
-        user_id = str(user.id)
-
-        if user_id in self.users:
-            self.users[user_id]['last_activity'] = datetime.now().isoformat()
-            save_users(self.users)
-
-        text = self.get_cached_rate()
-        keyboard = self.create_keyboard()
-
-        update.message.reply_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
-            disable_web_page_preview=True
-        )
-
-    def cmd_help(self, update: Update, context: CallbackContext):
-        help_text = (
-            "📌 Доступные команды:\n"
-            "/start — регистрация\n"
-            "/get_rate — получить текущий курс USDT\n"
-            "/help — помощь\n\n"
-            "🛠 Админ:\n"
-            "/setinterval <сек> — задать интервал обновления\n"
-            "/users — список пользователей"
-        )
-        update.message.reply_text(help_text)
-
-    def cmd_setinterval(self, update: Update, context: CallbackContext):
-        args = context.args
-        if not args:
-            update.message.reply_text("Использование: /setinterval <секунд>")
-            return
-        try:
-            interval = int(args[0])
-            if interval < 60:
-                update.message.reply_text("Интервал должен быть минимум 60 секунд.")
-                return
-            self.sleep_time = interval
-            update.message.reply_text(f"Интервал обновления установлен: {interval} сек.")
-            logger.info(f"Админ изменил интервал: {interval}")
-        except ValueError:
-            update.message.reply_text("Введите число.")
-
-    def cmd_users(self, update: Update, context: CallbackContext):
-        if not self.users:
-            update.message.reply_text("Нет зарегистрированных пользователей.")
-            return
-        msg = "👥 Список пользователей:\n"
-        for uid, data in self.users.items():
-            username = data.get('username', '')
-            first_name = data.get('first_name', '')
-            last_name = data.get('last_name', '')
-            reg_date = data.get('registration_date', '')
-            msg += f"{uid} @{username} {first_name} {last_name} ({reg_date})\n"
-        update.message.reply_text(msg)
-
-    def find_last_bot_message(self):
-        """Ищет последнее сообщение от бота в топике"""
-        if self.bot_message_id is not None:
-            return self.bot_message_id
-
-        try:
-            bot = self.updater.bot
-            chat = bot.get_chat(self.channel_id)
-
-            if hasattr(chat, 'pinned_message') and chat.pinned_message:
-                if (chat.pinned_message.from_user and
-                    chat.pinned_message.from_user.id == bot.get_me().id and
-                    chat.pinned_message.message_thread_id == int(self.topic_id)):
-                    self.bot_message_id = chat.pinned_message.message_id
-                    logger.info(f"Найдено закреплённое сообщение: {self.bot_message_id}")
-                    return self.bot_message_id
-            return None
-        except Exception as e:
-            logger.error(f"Ошибка при поиске сообщения: {e}")
-            return None
-
-    def send_or_edit_message(self, text):
-        try:
-            bot = self.updater.bot
-            keyboard = self.create_keyboard()
-            last_message_id = self.find_last_bot_message()
-
-            if last_message_id:
-                try:
-                    bot.edit_message_text(
-                        chat_id=self.channel_id,
-                        message_id=last_message_id,
-                        text=text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard,
-                        disable_web_page_preview=True
-                    )
-                    logger.info("Сообщение с курсом обновлено.")
-                except Exception as edit_error:
-                    if "Message is not modified" in str(edit_error):
-                        logger.info("Курс не изменился — редактирование не требуется.")
-                    else:
-                        logger.error(f"Ошибка при редактировании: {edit_error}")
-                        self.bot_message_id = None
-            else:
-                message = bot.send_message(
-                    chat_id=self.channel_id,
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=keyboard,
-                    disable_web_page_preview=True,
-                    message_thread_id=int(self.topic_id)
-                )
-                self.bot_message_id = message.message_id
-                try:
-                    bot.pin_chat_message(
-                        chat_id=self.channel_id,
-                        message_id=message.message_id
-                    )
-                    logger.info("Сообщение отправлено и закреплено.")
-                except Exception as pin_error:
-                    logger.warning(f"Не удалось закрепить: {pin_error}")
-        except Exception as e:
-            logger.error(f"Ошибка при отправке/редактировании: {e}")
-
-    def periodic_send(self):
-        while True:
-            try:
-                if not self.channel_id or not self.topic_id:
-                    logger.warning("Не указан channel_id или topic_id.")
-                else:
-                    text = self.get_cached_rate()
-                    logger.info(f"Получен курс: {text}")
-                    self.send_or_edit_message(text)
-            except Exception as e:
-                logger.error(f"Ошибка в periodic_send: {e}")
-            time.sleep(self.sleep_time)
-
-    def run(self):
-        print("▶️ Запуск run()")
-        logger.info("▶️ Запуск run()")
-
-        self.thread.start()
-        logger.info("🔁 Поток обновления запущен.")
-
-        self.updater.start_polling()
-        logger.info("📡 Бот начал polling.")
-        self.updater.idle()
-        logger.info("🛑 polling завершён.")
+            else: os.remove(LOCK_FILE)
+        except: os.remove(LOCK_FILE)
+    with open(LOCK_FILE, 'w') as f: f.write(str(os.getpid()))
 
 if __name__ == '__main__':
-    print("📦 Запуск CurrencyBot...")
-    lock_created = False
+    create_lock()
     try:
-        create_lock()
-        lock_created = True
         bot = CurrencyBot()
-        print("✅ Бот создан. Запуск...")
         bot.run()
-    except Exception as e:
-        print(f"❌ Ошибка при запуске: {e}")
-        import traceback
-        traceback.print_exc()
-        logger.error(f"Ошибка при запуске: {e}")
+    except KeyboardInterrupt:
+        print("\nБот остановлен.")
     finally:
-        if lock_created:
-            print("🧹 Очистка lock-файла")
-            remove_lock()
+        if os.path.exists(LOCK_FILE): os.remove(LOCK_FILE)
