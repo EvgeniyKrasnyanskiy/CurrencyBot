@@ -121,11 +121,11 @@ def get_all_rates(history_r, history_c):
                 # Стрелка (по сравнению с последним кэшем)
                 prev_r = history_r[-1][1]
                 if curr_r > prev_r:
-                    arrow = " ↑"
+                    arrow = "⬈"
                 elif curr_r < prev_r:
-                    arrow = " ↓"
+                    arrow = "⬊"
                 else:
-                    arrow = " →"
+                    arrow = "→"
 
                 # Процент за день (с 00:00)
                 first_today = next((p for t, p in history_r if t >= start_of_day), history_r[0][1])
