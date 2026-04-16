@@ -130,7 +130,7 @@ def get_all_rates(history_r, history_c):
                 # Процент за день (с 00:00)
                 first_today = next((p for t, p in history_r if t >= start_of_day), history_r[0][1])
                 diff_pct = ((curr_r - first_today) / first_today) * 100
-                day_diff_r = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (Rapira)"
+                day_diff_r = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (Rap)"
 
             res_r = f"[{curr_r:.2f}{arrow}]({url_link_rapira})"
     except Exception as e:
@@ -168,7 +168,7 @@ def get_all_rates(history_r, history_c):
     msg = f"💵 USDt = ₽{res_r} | ₽{res_c} \[{timestamp}]"
 
     if day_diff_r or day_diff_c:
-        msg += f"\n📈 за {date_str}: {day_diff_r} | {day_diff_c}"
+        msg += f"\n\n📈 {date_str}: {day_diff_r} | {day_diff_c}"
 
     return msg, usdt_Rapira_val, usdt_CG_val
 
