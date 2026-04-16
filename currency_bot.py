@@ -86,15 +86,23 @@ def save_bot_state(message_id):
     with open('data/bot_state.json', 'w') as f:
         json.dump({"last_message_id": message_id}, f)
 
+
 # --- КОРНЕВАЯ ЛОГИКА КУРСОВ ---
 def get_all_rates(history_r, history_c):
     headers = {"User-Agent": "Mozilla/5.0"}
     url_link_cg = "https://www.coingecko.com/en/coins/tether/rub"
     url_link_rapira = "https://rapira.net/exchange/USDT_RUB"
-    timestamp = datetime.now().strftime("%H:%M")
-    
+
+    now_dt = datetime.now()
+    timestamp = now_dt.strftime("%H:%M")
+    date_str = now_dt.strftime("%d.%m")
+
+    # Начало текущих суток для расчета % за день
+    start_of_day = datetime(now_dt.year, now_dt.month, now_dt.day).timestamp()
+
     usdt_CG_val, usdt_Rapira_val = None, None
     res_r, res_c = "???", "???"
+    day_diff_r, day_diff_c = "", ""
 
     to_time = int(time.time() * 1000)
     from_time = to_time - (24 * 60 * 60 * 1000)
@@ -107,14 +115,26 @@ def get_all_rates(history_r, history_c):
         if isinstance(data, list) and len(data) > 0:
             curr_r = float(data[-1][4])
             usdt_Rapira_val = curr_r
-            diff_str = ""
+
+            arrow = ""
             if history_r:
+                # Стрелка (по сравнению с последним кэшем)
                 prev_r = history_r[-1][1]
-                diff = ((curr_r - prev_r) / prev_r) * 100
-                if abs(diff) >= 1.0:
-                    diff_str = f" ({'+' if diff > 0 else ''}{diff:.2f}%)"
-            res_r = f"[{curr_r:.2f}{diff_str}]({url_link_rapira})"
-    except Exception as e: logger.error(f"Rapira Error: {e}")
+                if curr_r > prev_r:
+                    arrow = " ↑"
+                elif curr_r < prev_r:
+                    arrow = " ↓"
+                else:
+                    arrow = " →"
+
+                # Процент за день (с 00:00)
+                first_today = next((p for t, p in history_r if t >= start_of_day), history_r[0][1])
+                diff_pct = ((curr_r - first_today) / first_today) * 100
+                day_diff_r = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (Rapira)"
+
+            res_r = f"[{curr_r:.2f}{arrow}]({url_link_rapira})"
+    except Exception as e:
+        logger.error(f"Rapira Error: {e}")
 
     # 2. CoinGecko
     try:
@@ -123,16 +143,33 @@ def get_all_rates(history_r, history_c):
         if r.status_code == 200:
             curr_c = float(r.json()['tether']['rub'])
             usdt_CG_val = curr_c
-            diff_str = ""
-            if history_c:
-                prev_c = history_c[-1][1]
-                diff = ((curr_c - prev_c) / prev_c) * 100
-                if abs(diff) >= 1.0:
-                    diff_str = f" ({'+' if diff > 0 else ''}{diff:.2f}%)"
-            res_c = f"[{curr_c:.2f}{diff_str}]({url_link_cg})"
-    except Exception as e: logger.error(f"CG Error: {e}")
 
-    msg = f"💵 USDt = ₽{res_r} и ₽{res_c} в {timestamp}"
+            arrow = ""
+            if history_c:
+                # Стрелка
+                prev_c = history_c[-1][1]
+                if curr_c > prev_c:
+                    arrow = "⬈"
+                elif curr_c < prev_c:
+                    arrow = "⬊"
+                else:
+                    arrow = "→"
+
+                # Процент за день (с 00:00)
+                first_today = next((p for t, p in history_c if t >= start_of_day), history_c[0][1])
+                diff_pct = ((curr_c - first_today) / first_today) * 100
+                day_diff_c = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (CG)"
+
+            res_c = f"[{curr_c:.2f}{arrow}]({url_link_cg})"
+    except Exception as e:
+        logger.error(f"CG Error: {e}")
+
+    # Формируем итоговое сообщение
+    msg = f"💵 USDt = ₽{res_r} | ₽{res_c} \[{timestamp}]"
+
+    if day_diff_r or day_diff_c:
+        msg += f"\n📈 за {date_str}: {day_diff_r} | {day_diff_c}"
+
     return msg, usdt_Rapira_val, usdt_CG_val
 
 # --- BOT CLASS ---
