@@ -8,8 +8,7 @@ from moderation.classifier import (
     CATEGORY_EXCHANGE,
     CATEGORY_EXCHANGE_REPLY,
     CATEGORY_SPAM,
-    CATEGORY_CHAT,
-    CATEGORY_UNKNOWN
+    CATEGORY_CHAT
 )
 
 class TestModerationClassifier(unittest.TestCase):
@@ -50,7 +49,8 @@ class TestModerationClassifier(unittest.TestCase):
             "Привет всем, как дела?",
             "Кто тут админ?",
             "Спасибо за помощь!",
-            "Подскажите пожалуйста где найти информацию"
+            "Подскажите пожалуйста где найти информацию",
+            "Перевел 5000 рублей на карту"
         ]
         for sample in chat_samples:
             msg = self._create_mock_message(text=sample)
@@ -73,20 +73,22 @@ class TestModerationClassifier(unittest.TestCase):
         cat, _ = classify_message(msg_voice)
         self.assertEqual(cat, CATEGORY_SPAM)
 
-    def test_reply_to_user_ad(self):
-        # Reply to another user's ad
+    def test_strict_mode_rejects_replies(self):
+        # Strict mode (default): replies are forbidden, redirecting to DM
         replied_msg = MagicMock()
         replied_msg.from_user.id = 99999
         msg = self._create_mock_message(text="Написал в ЛС, проверьте", reply_to=replied_msg)
+        cat, reason = classify_message(msg, bot_user_id=12345, allow_replies=False)
+        self.assertEqual(cat, CATEGORY_CHAT)
+        self.assertIn("личные сообщения", reason)
+
+    def test_optional_replies_mode(self):
+        # When allow_replies=True
+        replied_msg = MagicMock()
+        replied_msg.from_user.id = 99999
+        msg = self._create_mock_message(text="Написал в ЛС", reply_to=replied_msg)
         cat, _ = classify_message(msg, bot_user_id=12345, allow_replies=True)
         self.assertEqual(cat, CATEGORY_EXCHANGE_REPLY)
-
-        # Reply to bot rate message should not be exempted
-        bot_replied_msg = MagicMock()
-        bot_replied_msg.from_user.id = 12345
-        msg_to_bot = self._create_mock_message(text="Привет бот", reply_to=bot_replied_msg)
-        cat, _ = classify_message(msg_to_bot, bot_user_id=12345, allow_replies=True)
-        self.assertEqual(cat, CATEGORY_CHAT)
 
 if __name__ == '__main__':
     unittest.main()

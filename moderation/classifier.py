@@ -2,10 +2,9 @@
 Message classifier for Exchange topic moderation.
 Classifies messages into:
 - EXCHANGE: Valid crypto exchange announcement
-- EXCHANGE_REPLY: Allowed text reply to another user's ad/message
+- EXCHANGE_REPLY: Allowed text reply (if enabled in config)
 - SPAM: Forbidden media, ads, spam links
-- CHAT: Regular chatting, non-crypto conversations
-- UNKNOWN: Ambiguous message (logged, not deleted)
+- CHAT: Regular chatting, non-crypto conversations, replies, ambiguous messages
 """
 import re
 from typing import Tuple, Optional
@@ -15,7 +14,6 @@ CATEGORY_EXCHANGE = "EXCHANGE"
 CATEGORY_EXCHANGE_REPLY = "EXCHANGE_REPLY"
 CATEGORY_SPAM = "SPAM"
 CATEGORY_CHAT = "CHAT"
-CATEGORY_UNKNOWN = "UNKNOWN"
 
 # Regular expressions for crypto keywords
 RE_CRYPTO = re.compile(
@@ -53,7 +51,7 @@ RE_CASUAL_CHAT = re.compile(
 RE_INVITE_LINKS = re.compile(r'(?:t\.me/(?:joinchat|\+)|telegram\.me/(?:joinchat|\+))', re.IGNORECASE)
 
 
-def classify_message(message: Message, bot_user_id: Optional[int] = None, allow_replies: bool = True) -> Tuple[str, str]:
+def classify_message(message: Message, bot_user_id: Optional[int] = None, allow_replies: bool = False) -> Tuple[str, str]:
     """
     Classify a Telegram message.
     Returns: (category, reason)
@@ -85,12 +83,18 @@ def classify_message(message: Message, bot_user_id: Optional[int] = None, allow_
     if RE_INVITE_LINKS.search(text):
         return CATEGORY_SPAM, "Ссылки-приглашения запрещены в теме «Обмен»"
 
-    # 2. Check if this is a reply to another participant's message (e.g. ad inquiry)
-    if allow_replies and message.reply_to_message:
+    # 2. Check reply behavior
+    if message.reply_to_message:
         replied_user = message.reply_to_message.from_user
-        # Do not allow replies to bot (service messages / rate updates) as chat loopholes
-        if replied_user and (bot_user_id is None or replied_user.id != bot_user_id):
-            return CATEGORY_EXCHANGE_REPLY, "Ответ на сообщение другого участника в теме «Обмен»"
+        if not allow_replies:
+            return (
+                CATEGORY_CHAT,
+                "Обсуждения и ответы в теме запрещены. Для связи с автором объявления напишите ему в личные сообщения (ЛС) либо в общем чате"
+            )
+        else:
+            # If allowed in config and replied to another participant
+            if replied_user and (bot_user_id is None or replied_user.id != bot_user_id):
+                return CATEGORY_EXCHANGE_REPLY, "Ответ на сообщение другого участника в теме «Обмен»"
 
     # 3. Check for pure casual chat greetings
     if RE_CASUAL_CHAT.match(text):
@@ -112,14 +116,5 @@ def classify_message(message: Message, bot_user_id: Optional[int] = None, allow_
     if has_action and not has_crypto:
         return CATEGORY_CHAT, "Сообщение не относится к криптовалютному обмену"
 
-    # Case C: Short general messages or questions without crypto/action
-    words = text.split()
-    if len(words) <= 5 and not has_crypto and not has_action:
-        return CATEGORY_CHAT, "Сообщение не является объявлением об обмене"
-
-    # Case D: If message has some numbers/fiat but no crypto or action, ambiguous
-    if has_numbers or has_fiat:
-        return CATEGORY_UNKNOWN, "Недостаточно данных для уверенной классификации объявления"
-
-    # Default for text without exchange indicators
+    # Case C: Ambiguous or non-crypto messages are deleted as CHAT in strict mode
     return CATEGORY_CHAT, "В теме разрешены только текстовые объявления о покупке или продаже криптовалюты"

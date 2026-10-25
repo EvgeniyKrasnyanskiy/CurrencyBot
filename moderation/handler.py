@@ -1,13 +1,14 @@
 """
 Main moderation handler orchestrating classification, warnings,
-delayed message deletion, and rule announcements.
+delayed message deletion, rule announcements, and channel logging.
 """
 import os
+import html
 import logging
 import threading
 from datetime import datetime
 from typing import Optional
-from telegram import Update, Bot
+from telegram import Update, Bot, ParseMode
 from telegram.ext import CallbackContext
 
 from .config import ModerationConfig
@@ -17,8 +18,7 @@ from .classifier import (
     CATEGORY_EXCHANGE,
     CATEGORY_EXCHANGE_REPLY,
     CATEGORY_SPAM,
-    CATEGORY_CHAT,
-    CATEGORY_UNKNOWN
+    CATEGORY_CHAT
 )
 
 # Dedicated logger for moderation
@@ -33,17 +33,18 @@ if not mod_logger.handlers:
 
 WELCOME_RULES_TEXT = (
     "📢 *Обновление правил темы «Обмен»*\n\n"
-    "Внимание: теперь в этой теме включена автоматическая модерация.\n\n"
+    "Внимание: теперь в этой теме включена автоматическая модерация чистоты доски объявлений.\n\n"
     "✅ *Разрешено:*\n"
-    "• Текстовые объявления о покупке или продаже криптовалюты (USDT, BTC, ETH и др.) с указанием условий или цены.\n"
-    "• Текстовые ответы участникам в ветке объявления.\n\n"
+    "• Только текстовые объявления о покупке или продаже криптовалюты (USDT, BTC, ETH и др.) с указанием условий сделки.\n"
+    "• Не более 2 активных объявлений в сутки на одного участника.\n\n"
     "❌ *Запрещено:*\n"
+    "• Ответы и комментарии под объявлениями (для связи пишите автору сделки в личные сообщения (ЛС) либо в основном чате!).\n"
     "• Стикеры, GIF-анимации, фотографии, видео, голосовые и видеокружочки.\n"
-    "• Обычное общение, флуд и вопросы не по теме обмена.\n"
-    "• Спам, ссылки на сторонние ресурсы и каналы.\n\n"
+    "• Обычное общение, вопросы, споры и флуд.\n"
+    "• Спам, реклама сторонних каналов и сервисов.\n\n"
     "⚠️ *Важно:*\n"
-    "• Если вам необходимо изменить цену, объём или детали сделки — *отредактируйте исходное сообщение*.\n"
-    "• Нарушающие сообщения будут удаляться автоматически после предупреждения."
+    "• Если необходимо изменить цену или объем — *отредактируйте исходное объявление*.\n"
+    "• Все комментарии и нарушающие сообщения удаляются автоматически после предупреждения."
 )
 
 
@@ -51,6 +52,36 @@ class ModerationManager:
     def __init__(self, config: Optional[ModerationConfig] = None, storage: Optional[ModerationStorage] = None):
         self.config = config or ModerationConfig()
         self.storage = storage or ModerationStorage()
+
+    def send_log_to_channel(self, bot: Bot, user_title: str, user_id: int, category: str, reason: str, text: str, action: str):
+        """Send formatted moderation event log to configured Telegram channel."""
+        if not self.config.log_channel_id:
+            return
+
+        def _send():
+            try:
+                escaped_text = html.escape(text[:300]) if text else "<i>[медиа или пусто]</i>"
+                escaped_title = html.escape(user_title)
+                escaped_reason = html.escape(reason)
+
+                log_entry = (
+                    f"🛡 <b>Модерация темы «Обмен»</b>\n\n"
+                    f"👤 <b>Пользователь:</b> <a href=\"tg://user?id={user_id}\">{escaped_title}</a> (<code>{user_id}</code>)\n"
+                    f"🏷 <b>Категория:</b> <code>{category}</code>\n"
+                    f"📌 <b>Причина:</b> {escaped_reason}\n"
+                    f"⚡️ <b>Действие:</b> <code>{action}</code>\n\n"
+                    f"💬 <b>Текст:</b>\n<blockquote>{escaped_text}</blockquote>"
+                )
+                bot.send_message(
+                    chat_id=self.config.log_channel_id,
+                    text=log_entry,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                mod_logger.error(f"Failed to send log to moderation channel: {e}")
+
+        threading.Thread(target=_send, daemon=True).start()
 
     def send_welcome_rules_if_needed(self, bot: Bot):
         """Sends rules welcome message once if enabled and not sent yet."""
@@ -144,30 +175,29 @@ class ModerationManager:
         chat_id = message.chat_id
         message_id = message.message_id
         user_id = user.id
-        thread_id = message.message_thread_id
+        user_title = user.full_name or user.username or str(user.id)
+        msg_text = (message.text or message.caption or "")
 
         # 4. Handle classification outcome
         if category in (CATEGORY_EXCHANGE, CATEGORY_EXCHANGE_REPLY):
             if category == CATEGORY_EXCHANGE:
-                # Check active ad limits per user
-                existing_ad = self.storage.get_user_ad(user_id)
-                text = (message.text or message.caption or "")
+                # Check active ad limits per user (default: max 2 ads per 24 hours)
+                recent_ads = self.storage.get_user_recent_ads(user_id)
                 
-                # If user already has an active ad and limit is 1
-                if existing_ad and self.config.max_active_ads_per_user <= 1:
-                    ad_age = datetime.now().timestamp() - existing_ad.get("timestamp", 0)
-                    # If existing ad was within last 24 hours, ask to edit old ad
-                    if ad_age < 86400:
-                        reason = (
-                            "У вас уже есть активное объявление в теме. "
-                            "Пожалуйста, отредактируйте ваше существующее объявление вместо создания нового."
-                        )
-                        category = CATEGORY_SPAM
+                if len(recent_ads) >= self.config.max_active_ads_per_user:
+                    reason = (
+                        f"Превышен лимит объявлений (максимум {self.config.max_active_ads_per_user} в сутки). "
+                        "Пожалуйста, отредактируйте ваши существующие объявления вместо создания новых."
+                    )
+                    category = CATEGORY_SPAM
 
                 if category == CATEGORY_EXCHANGE:
-                    self.storage.register_ad(user_id, message_id, datetime.now().timestamp(), text)
+                    self.storage.register_ad(user_id, message_id, datetime.now().timestamp(), msg_text)
                     mod_logger.info(
                         f"ACCEPTED {category} | User: {user_id} | Msg: {message_id} | Reason: {reason}"
+                    )
+                    self.send_log_to_channel(
+                        context.bot, user_title, user_id, category, reason, msg_text, "ОДОБРЕНО (Опубликовано)"
                     )
                     return
 
@@ -177,7 +207,7 @@ class ModerationManager:
             warning_text = (
                 f"⚠️ *В теме «Обмен» действуют правила модерации.*\n\n"
                 f"*Причина:* {reason}.\n\n"
-                f"_Для изменения условий сделки редактируйте исходное сообщение._\n"
+                f"_Для изменения условий сделки редактируйте исходное объявление._\n"
                 f"⏳ Сообщение и это предупреждение будут удалены через {delay} сек."
             )
 
@@ -191,25 +221,23 @@ class ModerationManager:
             except Exception as e:
                 mod_logger.error(f"Failed to post warning reply to msg {message_id}: {e}")
 
+            action_desc = f"УДАЛЕНО (таймаут {delay}с)"
             mod_logger.info(
                 f"VIOLATION {category} | User: {user_id} | Msg: {message_id} | "
                 f"Reason: {reason} | WarningMsg: {warning_msg_id} | Scheduled delete in {delay}s"
             )
 
+            self.send_log_to_channel(
+                context.bot, user_title, user_id, category, reason, msg_text, action_desc
+            )
+
             if warning_msg_id:
                 self.schedule_delayed_deletion(context.bot, chat_id, message_id, warning_msg_id, delay)
             else:
-                # If reply failed, delete immediately
                 try:
                     context.bot.delete_message(chat_id=chat_id, message_id=message_id)
                 except Exception as e:
                     mod_logger.error(f"Immediate deletion error: {e}")
-
-        elif category == CATEGORY_UNKNOWN:
-            mod_logger.warning(
-                f"UNKNOWN | User: {user_id} | Msg: {message_id} | Thread: {thread_id} | "
-                f"Text: {message.text or message.caption} | Reason: {reason}"
-            )
 
     def handle_edited_message(self, update: Update, context: CallbackContext):
         """Track edits to prevent duplicate ads while allowing updates."""

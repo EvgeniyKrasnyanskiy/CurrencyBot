@@ -20,17 +20,21 @@ class ModerationConfig:
             else (int(os.getenv("TOPIC_ID")) if os.getenv("TOPIC_ID") else None)
         )
 
+        # Telegram Log Channel for moderation events (e.g. -100...)
+        env_log_channel = os.getenv("MODERATION_LOG_CHANNEL_ID")
+        self.log_channel_id: Optional[int] = int(env_log_channel) if env_log_channel and env_log_channel.strip() else None
+
         # Warning & deletion delay (seconds)
         self.warning_delete_delay: int = int(os.getenv("WARNING_DELETE_DELAY", "60"))
 
         # Welcome message setting
         self.welcome_message_enabled: bool = os.getenv("WELCOME_MESSAGE_ENABLED", "True").lower() in ("true", "1", "yes")
 
-        # Allow textual replies to other users' ads
-        self.allow_replies_to_ads: bool = os.getenv("ALLOW_REPLIES_TO_ADS", "True").lower() in ("true", "1", "yes")
+        # Allow textual replies to other users' ads (Default: False for clean board)
+        self.allow_replies_to_ads: bool = os.getenv("ALLOW_REPLIES_TO_ADS", "False").lower() in ("true", "1", "yes")
 
-        # Rate limits
-        self.max_active_ads_per_user: int = int(os.getenv("MAX_ACTIVE_ADS_PER_USER", "1"))
+        # Rate limits (Default: 2 ads per 24 hours)
+        self.max_active_ads_per_user: int = int(os.getenv("MAX_ACTIVE_ADS_PER_USER", "2"))
 
         # Whitelist / Admins bypass
         env_whitelist = os.getenv("MODERATION_WHITELIST_USERS", "[]")

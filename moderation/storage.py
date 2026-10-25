@@ -1,11 +1,12 @@
 """
 Storage and state management for Exchange topic moderation.
-Tracks active user ads, limits, and welcome message status.
+Tracks user ads history (up to N ads per 24h) and welcome message status.
 """
 import os
 import json
+import time
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ class ModerationStorage:
         self.state: Dict[str, Any] = {
             "welcome_sent": False,
             "welcome_message_id": None,
-            "user_ads": {},  # {user_id_str: {"message_id": int, "timestamp": float, "text": str}}
+            "user_ads": {},  # {user_id_str: [{"message_id": int, "timestamp": float, "text": str}]}
             "known_ad_message_ids": [] # list of message_ids of valid ads
         }
         self.load()
@@ -30,6 +31,10 @@ class ModerationStorage:
             with open(self.state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.state.update(data)
+                # Ensure user_ads entries are lists
+                for uid, ads in list(self.state.get("user_ads", {}).items()):
+                    if isinstance(ads, dict):
+                        self.state["user_ads"][uid] = [ads]
         except Exception as e:
             logger.error(f"Error loading moderation state: {e}")
 
@@ -51,33 +56,47 @@ class ModerationStorage:
         self.state["welcome_message_id"] = message_id
         self.save()
 
-    # --- Ads Tracking ---
-    def register_ad(self, user_id: int, message_id: int, timestamp: float, text: str):
-        """Register a valid exchange ad."""
+    # --- Ads Tracking (per 24 hours) ---
+    def get_user_recent_ads(self, user_id: int, window_seconds: int = 86400) -> List[Dict[str, Any]]:
+        """Get ads posted by user in the last window_seconds (default 24h)."""
         uid_str = str(user_id)
-        self.state["user_ads"][uid_str] = {
+        ads = self.state["user_ads"].get(uid_str, [])
+        now = time.time()
+        # Filter active ads within window
+        valid_ads = [ad for ad in ads if now - ad.get("timestamp", 0) < window_seconds]
+        if len(valid_ads) != len(ads):
+            self.state["user_ads"][uid_str] = valid_ads
+            self.save()
+        return valid_ads
+
+    def register_ad(self, user_id: int, message_id: int, timestamp: float, text: str):
+        """Register a valid exchange ad for user."""
+        uid_str = str(user_id)
+        if uid_str not in self.state["user_ads"]:
+            self.state["user_ads"][uid_str] = []
+
+        new_entry = {
             "message_id": message_id,
             "timestamp": timestamp,
             "text": text[:200]
         }
+        self.state["user_ads"][uid_str].append(new_entry)
+
         if message_id not in self.state["known_ad_message_ids"]:
             self.state["known_ad_message_ids"].append(message_id)
-            # Keep only last 1000 ad IDs in memory
             if len(self.state["known_ad_message_ids"]) > 1000:
                 self.state["known_ad_message_ids"] = self.state["known_ad_message_ids"][-1000:]
         self.save()
 
     def update_ad_text(self, user_id: int, message_id: int, new_text: str):
-        """Update existing ad upon edit."""
+        """Update existing ad text upon user edit."""
         uid_str = str(user_id)
-        if uid_str in self.state["user_ads"] and self.state["user_ads"][uid_str]["message_id"] == message_id:
-            self.state["user_ads"][uid_str]["text"] = new_text[:200]
+        ads = self.state["user_ads"].get(uid_str, [])
+        updated = False
+        for ad in ads:
+            if ad.get("message_id") == message_id:
+                ad["text"] = new_text[:200]
+                updated = True
+                break
+        if updated:
             self.save()
-
-    def get_user_ad(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """Get active ad for user if any."""
-        return self.state["user_ads"].get(str(user_id))
-
-    def is_known_ad_message(self, message_id: int) -> bool:
-        """Check if message_id belongs to a recognized ad."""
-        return message_id in self.state["known_ad_message_ids"]
