@@ -10,8 +10,9 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, Filters
+from telegram.ext import Updater, CommandHandler, CallbackContext, Filters, MessageHandler
 from telegram.error import NetworkError, RetryAfter, TimedOut
+from moderation import ModerationManager
 
 load_dotenv()
 
@@ -187,6 +188,7 @@ class CurrencyBot:
         self.history_r = []
         self.history_c = []
         self.sent_alerts = {}
+        self.moderation = ModerationManager()
         
         self._build_updater()
 
@@ -201,6 +203,16 @@ class CurrencyBot:
         dp.add_handler(CommandHandler('help', self.cmd_help))
         admin_filter = Filters.user(user_id=self.config['admins'])
         dp.add_handler(CommandHandler('users', self.cmd_users, filters=admin_filter))
+
+        # Moderation handlers (group 1 so they don't interfere with command handling)
+        dp.add_handler(
+            MessageHandler(Filters.all & ~Filters.update.edited_message, self.moderation.handle_message),
+            group=1
+        )
+        dp.add_handler(
+            MessageHandler(Filters.update.edited_message, self.moderation.handle_edited_message),
+            group=1
+        )
 
     def get_rate_cached(self):
         now = time.time()
@@ -341,6 +353,9 @@ class CurrencyBot:
             time.sleep(self.config['sleep_time'])
 
     def run(self):
+        # Post rules welcome announcement if configured and not sent yet
+        self.moderation.send_welcome_rules_if_needed(self.updater.bot)
+
         threading.Thread(target=self.periodic_update, daemon=True).start()
         self.updater.start_polling()
         self.updater.idle()
