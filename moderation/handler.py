@@ -8,7 +8,7 @@ import logging
 import threading
 from datetime import datetime
 from typing import Optional
-from telegram import Update, Bot, ParseMode
+from telegram import Update, Bot, ParseMode, Message
 from telegram.ext import CallbackContext
 
 from .config import ModerationConfig
@@ -32,20 +32,43 @@ if not mod_logger.handlers:
 
 
 WELCOME_RULES_TEXT = (
-    "📢 *Обновление правил темы «Обмен»*\n\n"
+    "📢 <b>Обновление правил темы «Обмен»</b>\n\n"
     "Внимание: теперь в этой теме включена автоматическая модерация чистоты доски объявлений.\n\n"
-    "✅ *Разрешено:*\n"
+    "✅ <b>Разрешено:</b>\n"
     "• Только текстовые объявления о покупке или продаже криптовалюты (USDT, BTC, ETH и др.) с указанием условий сделки.\n"
     "• Не более 2 активных объявлений в сутки на одного участника.\n\n"
-    "❌ *Запрещено:*\n"
+    "❌ <b>Запрещено:</b>\n"
     "• Ответы и комментарии под объявлениями (для связи пишите автору сделки в личные сообщения (ЛС) либо в основном чате!).\n"
     "• Стикеры, GIF-анимации, фотографии, видео, голосовые и видеокружочки.\n"
     "• Обычное общение, вопросы, споры и флуд.\n"
     "• Спам, реклама сторонних каналов и сервисов.\n\n"
-    "⚠️ *Важно:*\n"
-    "• Если необходимо изменить цену или объем — *отредактируйте исходное объявление*.\n"
+    "⚠️ <b>Важно:</b>\n"
+    "• Если необходимо изменить цену или объем — <i>отредактируйте исходное объявление</i>.\n"
     "• Все комментарии и нарушающие сообщения удаляются автоматически после предупреждения."
 )
+
+
+def is_service_message(message: Message) -> bool:
+    """Check if the message is a Telegram system/service notification."""
+    if not message:
+        return True
+    if (
+        message.new_chat_members
+        or message.left_chat_member
+        or message.pinned_message
+        or message.new_chat_title
+        or message.new_chat_photo
+        or message.delete_chat_photo
+        or message.group_chat_created
+        or message.supergroup_chat_created
+        or message.channel_chat_created
+        or getattr(message, "forum_topic_created", None)
+        or getattr(message, "forum_topic_closed", None)
+        or getattr(message, "forum_topic_reopened", None)
+        or getattr(message, "forum_topic_edited", None)
+    ):
+        return True
+    return False
 
 
 class ModerationManager:
@@ -54,16 +77,7 @@ class ModerationManager:
         self.storage = storage or ModerationStorage()
 
     def send_log_to_channel(self, bot: Bot, log_type: str, user_title: str, user_id: int, category: str, reason: str, text: str, action: str):
-        """
-        Send formatted moderation event log to configured Telegram channel with rich prefix.
-        log_type examples:
-          - "🗑 [УДАЛЕНИЕ: СПАМ / МЕДИА]"
-          - "💬 [УДАЛЕНИЕ: ЧАТ / ОТВЕТ В ТЕМЕ]"
-          - "⏳ [УДАЛЕНИЕ: ЛИМИТ 2 В СУТКИ]"
-          - "✅ [ОБЪЯВЛЕНИЕ: ОПУБЛИКОВАНО]"
-          - "✏️ [ОБЪЯВЛЕНИЕ: ОТРЕДАКТИРОВАНО]"
-          - "📢 [ПРАВИЛА: ПУБЛИКАЦИЯ В ТОПИК]"
-        """
+        """Send formatted moderation event log to configured Telegram channel."""
         if not self.config.log_channel_id:
             return
 
@@ -107,7 +121,7 @@ class ModerationManager:
             msg = bot.send_message(
                 chat_id=self.config.target_group_id,
                 text=WELCOME_RULES_TEXT,
-                parse_mode="Markdown",
+                parse_mode=ParseMode.HTML,
                 message_thread_id=self.config.target_thread_id
             )
             self.storage.mark_welcome_sent(msg.message_id)
@@ -119,7 +133,7 @@ class ModerationManager:
                 user_id=bot.id,
                 category="RULES",
                 reason="Первоначальная публикация правил темы",
-                text=WELCOME_RULES_TEXT,
+                text="Опубликовано обновление правил темы «Обмен»",
                 action="ОПУБЛИКОВАНО"
             )
         except Exception as e:
@@ -175,6 +189,10 @@ class ModerationManager:
         message = update.effective_message
         user = update.effective_user
         if not message or not user:
+            return
+
+        # Ignore Telegram system/service messages
+        if is_service_message(message):
             return
 
         # 1. Ignore bot's own messages
@@ -239,10 +257,11 @@ class ModerationManager:
                     log_type = "💬 [УДАЛЕНИЕ: НЕ ОБЪЯВЛЕНИЕ / ЧАТ]"
 
             delay = self.config.warning_delete_delay
+            escaped_reason = html.escape(reason)
             warning_text = (
-                f"⚠️ *В теме «Обмен» действуют правила модерации.*\n\n"
-                f"*Причина:* {reason}.\n\n"
-                f"_Для изменения условий сделки редактируйте исходное объявление._\n"
+                f"⚠️ <b>В теме «Обмен» действуют правила модерации.</b>\n\n"
+                f"<b>Причина:</b> {escaped_reason}.\n\n"
+                f"<i>Для изменения условий сделки редактируйте исходное объявление.</i>\n"
                 f"⏳ Сообщение и это предупреждение будут удалены через {delay} сек."
             )
 
@@ -250,7 +269,7 @@ class ModerationManager:
             try:
                 reply_msg = message.reply_text(
                     warning_text,
-                    parse_mode="Markdown"
+                    parse_mode=ParseMode.HTML
                 )
                 warning_msg_id = reply_msg.message_id
             except Exception as e:
@@ -289,6 +308,9 @@ class ModerationManager:
         message = update.edited_message
         user = update.effective_user
         if not message or not user:
+            return
+
+        if is_service_message(message):
             return
 
         new_text = (message.text or message.caption or "")
