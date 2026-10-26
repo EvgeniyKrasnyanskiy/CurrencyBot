@@ -172,7 +172,7 @@ def get_all_rates(history_r, history_c):
         logger.error(f"CG Error: {e}")
 
     # Формируем итоговое сообщение
-    msg = f"💵 USDt = ₽{res_r} | ₽{res_c} \[{timestamp}]"
+    msg = rf"💵 USDt = ₽{res_r} | ₽{res_c} \[{timestamp}]"
 
     if day_diff_r or day_diff_c:
         msg += f"\n\n📈 {date_str}: {day_diff_r} | {day_diff_c}"
@@ -280,6 +280,80 @@ class CurrencyBot:
         else:
             update.message.reply_text("⚠️ Ошибка публикации правил. Проверьте logs/moderation.log")
 
+    def _send_and_pin_rate_message(self, bot, text, kb):
+        """Send a new rates message to the channel/topic, pin it, and persist state."""
+        try:
+            msg = bot.send_message(
+                chat_id=self.config['channel_id'],
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=kb,
+                message_thread_id=int(self.config['topic_id']) if self.config['topic_id'] else None,
+                disable_web_page_preview=True
+            )
+            self.bot_message_id = msg.message_id
+            save_bot_state(self.bot_message_id)
+            logger.info(f"Отправлено новое сообщение с курсом (ID: {self.bot_message_id}).")
+            try:
+                bot.pin_chat_message(self.config['channel_id'], self.bot_message_id)
+                logger.info(f"Сообщение {self.bot_message_id} успешно закреплено.")
+            except Exception as pin_err:
+                logger.warning(f"Не удалось закрепить сообщение {self.bot_message_id}: {pin_err}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка отправки нового закрепленного сообщения: {e}")
+            return False
+
+    def update_pinned_rate_message(self, bot, text):
+        """Update existing pinned rates message or immediately create and pin a new one if missing/deleted."""
+        if not self.config['channel_id']:
+            return
+
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("ОБМЕН", url="https://telegra.ph/Obmen-11-06-2")]])
+
+        # If ID is unknown, check if a pinned message from this bot already exists in the channel/topic
+        if not self.bot_message_id:
+            try:
+                chat = bot.get_chat(self.config['channel_id'])
+                pinned = getattr(chat, 'pinned_message', None)
+                if pinned and pinned.from_user and pinned.from_user.id == bot.id:
+                    target_thread = int(self.config['topic_id']) if self.config['topic_id'] else None
+                    if target_thread is None or pinned.message_thread_id == target_thread:
+                        self.bot_message_id = pinned.message_id
+                        save_bot_state(self.bot_message_id)
+                        logger.info(f"Обнаружен существующий закреп бота: {self.bot_message_id}")
+            except Exception as e:
+                logger.debug(f"Не удалось проверить текущий закреп чата: {e}")
+
+        # If still no message ID, create and pin new
+        if not self.bot_message_id:
+            self._send_and_pin_rate_message(bot, text, kb)
+            return
+
+        # Attempt to edit existing message
+        try:
+            bot.edit_message_text(
+                text=text,
+                chat_id=self.config['channel_id'],
+                message_id=self.bot_message_id,
+                parse_mode="Markdown",
+                reply_markup=kb,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            error_msg = str(e)
+            error_lower = error_msg.lower()
+            if "message is not modified" in error_lower:
+                pass
+            elif any(s in error_lower for s in ["not found", "invalid", "can't be edited", "cant be edited", "deleted"]):
+                logger.warning(f"Закреп {self.bot_message_id} не найден или удален ({e}). Немедленно создаем новый...")
+                self.bot_message_id = None
+                save_bot_state(None)
+                # Immediately send and pin without waiting for next cycle
+                self._send_and_pin_rate_message(bot, text, kb)
+            else:
+                logger.error(f"Ошибка правки закрепа {self.bot_message_id}: {e}")
+
     def periodic_update(self):
         # Настройки "тишины"
         alert_cooldown = 3000  # 50 минут в секундах
@@ -322,44 +396,7 @@ class CurrencyBot:
                 self.sent_alerts = {k: v for k, v in self.sent_alerts.items() if now - v < 86400}
 
                 # 4. Обновление закрепленного сообщения
-                if self.config['channel_id']:
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("ОБМЕН", url="https://telegra.ph/Obmen-11-06-2")]])
-                    
-                    if not self.bot_message_id:
-                        # Отправляем новое сообщение
-                        msg = bot.send_message(
-                            chat_id=self.config['channel_id'], 
-                            text=text, 
-                            parse_mode="Markdown", 
-                            reply_markup=kb, 
-                            message_thread_id=int(self.config['topic_id']) if self.config['topic_id'] else None,
-                            disable_web_page_preview=True
-                        )
-                        self.bot_message_id = msg.message_id
-                        save_bot_state(self.bot_message_id) # Запоминаем в файл
-                        try:
-                            bot.pin_chat_message(self.config['channel_id'], self.bot_message_id)
-                        except: pass
-                    else:
-                        # Пытаемся редактировать существующее
-                        try:
-                            bot.edit_message_text(
-                                text=text, 
-                                chat_id=self.config['channel_id'], 
-                                message_id=self.bot_message_id, 
-                                parse_mode="Markdown", 
-                                reply_markup=kb,
-                                disable_web_page_preview=True
-                            )
-                        except Exception as e:
-                            error_msg = str(e)
-                            # Если сообщение не найдено (удалено) — сбрасываем везде
-                            if "Message to edit not found" in error_msg or "Message_id_invalid" in error_msg:
-                                self.bot_message_id = None
-                                save_bot_state(None) # Сбрасываем в файле
-                                logger.warning("Закреп не найден, ID сброшен для пересоздания.")
-                            elif "Message is not modified" not in error_msg:
-                                logger.error(f"Ошибка правки закрепа: {e}")
+                self.update_pinned_rate_message(bot, text)
 
             except Exception as e:
                 logger.error(f"Критическая ошибка в periodic_update: {e}")

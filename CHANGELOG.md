@@ -17,3 +17,12 @@ All notable changes to this project will be documented in this file.
   - One-time welcome announcement with topic rules (`WELCOME_MESSAGE_ENABLED`).
   - State tracking in `data/moderation_state.json`.
   - Comprehensive unit test suite in `tests/test_moderation.py`.
+
+### Fixed
+- **Moderation False Positives**:
+  - Excluded forum topic creation service messages (`forum_topic_created` / `message_thread_id`), replies to the bot (pinned rates / welcome rules), and user self-replies from being treated as forbidden participant replies.
+  - Allowed valid standalone exchange announcements (e.g. "Продам 180 usdt по 82 на карту") even if a reply reference is present, while strictly filtering direct discussions and negotiations directed at other users.
+- **Rate Message Pinning**:
+  - Implemented case-insensitive error detection for missing/deleted Telegram messages (`message to edit not found`).
+  - Added immediate re-creation and pinning of the rate message upon detecting deletion, eliminating the 10-minute delay.
+  - Added lookup for existing pinned bot message on startup to prevent duplicates.

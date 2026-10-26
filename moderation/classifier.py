@@ -50,6 +50,46 @@ RE_CASUAL_CHAT = re.compile(
 # External invite link patterns
 RE_INVITE_LINKS = re.compile(r'(?:t\.me/(?:joinchat|\+)|telegram\.me/(?:joinchat|\+))', re.IGNORECASE)
 
+# Direct conversation or discussion markers under other users' posts
+RE_DISCUSSION_MARKERS = re.compile(
+    r'\b(в лс|в личку|лс|личк[а-я]*|написал[а-я]*|отписал[а-я]*|ответил[а-я]*|'
+    r'чекни|актуально|твой|твои|твоего|твоем|у тебя|тебе|тобой|ответь[а-я]*|'
+    r'согласен|дорого|перевел|отправил)\b',
+    re.IGNORECASE
+)
+
+
+def is_participant_reply(message: Message, bot_user_id: Optional[int] = None) -> bool:
+    """
+    Check if the message is an actual reply to another chat participant's message,
+    excluding Telegram topic creation service messages, replies to bot, and self-replies.
+    """
+    reply = getattr(message, "reply_to_message", None)
+    if not reply:
+        return False
+
+    # 1. Ignore forum topic creation service messages or thread root message
+    if getattr(reply, "forum_topic_created", None) is not None:
+        return False
+    thread_id = getattr(message, "message_thread_id", None)
+    reply_msg_id = getattr(reply, "message_id", None)
+    if thread_id is not None and reply_msg_id is not None and reply_msg_id == thread_id:
+        return False
+
+    # 2. Ignore replies to the bot itself (e.g. pinned rates, rules announcement)
+    replied_user = getattr(reply, "from_user", None)
+    replied_user_id = getattr(replied_user, "id", None) if replied_user else None
+    if replied_user_id is not None and bot_user_id is not None and replied_user_id == bot_user_id:
+        return False
+
+    # 3. Ignore self-replies (e.g. user editing or replying to their own previous announcement)
+    sender = getattr(message, "from_user", None)
+    sender_id = getattr(sender, "id", None) if sender else None
+    if sender_id is not None and replied_user_id is not None and sender_id == replied_user_id:
+        return False
+
+    return True
+
 
 def classify_message(message: Message, bot_user_id: Optional[int] = None, allow_replies: bool = False) -> Tuple[str, str]:
     """
@@ -83,38 +123,44 @@ def classify_message(message: Message, bot_user_id: Optional[int] = None, allow_
     if RE_INVITE_LINKS.search(text):
         return CATEGORY_SPAM, "Ссылки-приглашения запрещены в теме «Обмен»"
 
-    # 2. Check reply behavior
-    if message.reply_to_message:
-        replied_user = message.reply_to_message.from_user
+    # 2. Check for pure casual chat greetings
+    if RE_CASUAL_CHAT.match(text):
+        return CATEGORY_CHAT, "Обычное общение и приветствия не являются объявлением об обмене"
+
+    # 3. Analyze content for crypto exchange indicators
+    has_crypto = bool(RE_CRYPTO.search(text))
+    has_action = bool(RE_TRADE_ACTION.search(text))
+    has_fiat = bool(RE_FIAT.search(text))
+    has_numbers = bool(RE_NUMBERS.search(text))
+
+    is_exchange_ad = has_crypto and (has_action or has_fiat or has_numbers)
+
+    # 4. Check reply behavior
+    is_reply = is_participant_reply(message, bot_user_id=bot_user_id)
+    if is_reply:
+        has_discussion_markers = bool(RE_DISCUSSION_MARKERS.search(text))
+
+        # If it's a valid ad without direct chat/negotiation phrases directed at the user, allow it
+        if is_exchange_ad and not has_discussion_markers:
+            crypto_match = RE_CRYPTO.search(text).group(0).upper()
+            return CATEGORY_EXCHANGE, f"Обнаружено объявление об обмене с упоминанием {crypto_match}"
+
         if not allow_replies:
             return (
                 CATEGORY_CHAT,
                 "Обсуждения и ответы в теме запрещены. Для связи с автором объявления напишите ему в личные сообщения (ЛС) либо в общем чате"
             )
         else:
-            # If allowed in config and replied to another participant
-            if replied_user and (bot_user_id is None or replied_user.id != bot_user_id):
-                return CATEGORY_EXCHANGE_REPLY, "Ответ на сообщение другого участника в теме «Обмен»"
+            return CATEGORY_EXCHANGE_REPLY, "Ответ на сообщение другого участника в теме «Обмен»"
 
-    # 3. Check for pure casual chat greetings
-    if RE_CASUAL_CHAT.match(text):
-        return CATEGORY_CHAT, "Обычное общение и приветствия не являются объявлением об обмене"
-
-    # 4. Analyze content for crypto exchange indicators
-    has_crypto = bool(RE_CRYPTO.search(text))
-    has_action = bool(RE_TRADE_ACTION.search(text))
-    has_fiat = bool(RE_FIAT.search(text))
-    has_numbers = bool(RE_NUMBERS.search(text))
-
-    # Case A: Clear crypto exchange announcement
-    # Requires: (Action + Crypto) OR (Crypto + (Fiat or Numbers/Rates))
-    if has_crypto and (has_action or has_fiat or has_numbers):
+    # 5. Standalone announcement or non-crypto chat
+    if is_exchange_ad:
         crypto_match = RE_CRYPTO.search(text).group(0).upper()
         return CATEGORY_EXCHANGE, f"Обнаружено объявление об обмене с упоминанием {crypto_match}"
 
-    # Case B: Action without crypto (e.g. "Куплю кофе", "Продам гараж", "Куплю билет")
+    # Action without crypto (e.g. "Куплю кофе", "Продам гараж", "Куплю билет")
     if has_action and not has_crypto:
         return CATEGORY_CHAT, "Сообщение не относится к криптовалютному обмену"
 
-    # Case C: Ambiguous or non-crypto messages are deleted as CHAT in strict mode
+    # Ambiguous or non-crypto messages are deleted as CHAT in strict mode
     return CATEGORY_CHAT, "В теме разрешены только текстовые объявления о покупке или продаже криптовалюты"
