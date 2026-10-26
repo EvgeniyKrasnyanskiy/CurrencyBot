@@ -107,17 +107,26 @@ class ModerationManager:
 
         threading.Thread(target=_send, daemon=True).start()
 
-    def send_welcome_rules_if_needed(self, bot: Bot):
-        """Sends rules welcome message once if enabled and not sent yet."""
-        if not self.config.enabled or not self.config.welcome_message_enabled:
-            return
-        if self.storage.is_welcome_sent():
-            return
+    def send_welcome_rules_if_needed(self, bot: Bot, force: bool = False) -> bool:
+        """Sends rules welcome message once if enabled and not sent yet (or force=True)."""
+        if not self.config.enabled:
+            mod_logger.info("Welcome message skipped: Moderation is disabled in config.")
+            return False
+        if not self.config.welcome_message_enabled and not force:
+            mod_logger.info("Welcome message skipped: welcome_message_enabled is False.")
+            return False
+        if self.storage.is_welcome_sent() and not force:
+            mod_logger.info("Welcome message skipped: Already marked as sent in storage.")
+            return False
         if not self.config.target_group_id:
             mod_logger.warning("Welcome message skipped: TARGET_GROUP_ID is not configured.")
-            return
+            return False
 
         try:
+            mod_logger.info(
+                f"Attempting to post welcome rules: target_group={self.config.target_group_id}, "
+                f"thread_id={self.config.target_thread_id}"
+            )
             msg = bot.send_message(
                 chat_id=self.config.target_group_id,
                 text=WELCOME_RULES_TEXT,
@@ -132,12 +141,14 @@ class ModerationManager:
                 user_title="Бот",
                 user_id=bot.id,
                 category="RULES",
-                reason="Первоначальная публикация правил темы",
+                reason="Публикация правил темы «Обмен»",
                 text="Опубликовано обновление правил темы «Обмен»",
                 action="ОПУБЛИКОВАНО"
             )
+            return True
         except Exception as e:
             mod_logger.error(f"Failed to post welcome rules message: {e}")
+            return False
 
     def is_target_scope(self, update: Update) -> bool:
         """Verify that message belongs to monitored group and thread."""

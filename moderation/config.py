@@ -4,6 +4,24 @@ Moderation configuration loader and dataclass.
 import os
 import json
 from typing import List, Optional
+from dotenv import load_dotenv
+
+# Ensure environment variables are loaded
+load_dotenv()
+
+
+def _parse_int(val: Optional[str]) -> Optional[int]:
+    """Safely parse integer from env, handling empty strings and whitespace."""
+    if val is None:
+        return None
+    val = str(val).strip()
+    if not val:
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        return None
+
 
 class ModerationConfig:
     def __init__(self):
@@ -12,20 +30,17 @@ class ModerationConfig:
         
         # Target destination
         self.target_group_id: Optional[int] = (
-            int(os.getenv("MODERATION_TARGET_GROUP_ID")) if os.getenv("MODERATION_TARGET_GROUP_ID")
-            else (int(os.getenv("CHANNEL_ID")) if os.getenv("CHANNEL_ID") else None)
+            _parse_int(os.getenv("MODERATION_TARGET_GROUP_ID")) or _parse_int(os.getenv("CHANNEL_ID"))
         )
         self.target_thread_id: Optional[int] = (
-            int(os.getenv("MODERATION_TARGET_THREAD_ID")) if os.getenv("MODERATION_TARGET_THREAD_ID")
-            else (int(os.getenv("TOPIC_ID")) if os.getenv("TOPIC_ID") else None)
+            _parse_int(os.getenv("MODERATION_TARGET_THREAD_ID")) or _parse_int(os.getenv("TOPIC_ID"))
         )
 
         # Telegram Log Channel for moderation events (e.g. -100...)
-        env_log_channel = os.getenv("MODERATION_LOG_CHANNEL_ID")
-        self.log_channel_id: Optional[int] = int(env_log_channel) if env_log_channel and env_log_channel.strip() else None
+        self.log_channel_id: Optional[int] = _parse_int(os.getenv("MODERATION_LOG_CHANNEL_ID"))
 
         # Warning & deletion delay (seconds)
-        self.warning_delete_delay: int = int(os.getenv("WARNING_DELETE_DELAY", "60"))
+        self.warning_delete_delay: int = _parse_int(os.getenv("WARNING_DELETE_DELAY")) or 60
 
         # Welcome message setting
         self.welcome_message_enabled: bool = os.getenv("WELCOME_MESSAGE_ENABLED", "True").lower() in ("true", "1", "yes")
@@ -34,7 +49,7 @@ class ModerationConfig:
         self.allow_replies_to_ads: bool = os.getenv("ALLOW_REPLIES_TO_ADS", "False").lower() in ("true", "1", "yes")
 
         # Rate limits (Default: 2 ads per 24 hours)
-        self.max_active_ads_per_user: int = int(os.getenv("MAX_ACTIVE_ADS_PER_USER", "2"))
+        self.max_active_ads_per_user: int = _parse_int(os.getenv("MAX_ACTIVE_ADS_PER_USER")) or 2
 
         # Whitelist / Admins bypass
         env_whitelist = os.getenv("MODERATION_WHITELIST_USERS", "[]")

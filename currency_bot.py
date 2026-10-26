@@ -203,6 +203,7 @@ class CurrencyBot:
         dp.add_handler(CommandHandler('help', self.cmd_help))
         admin_filter = Filters.user(user_id=self.config['admins'])
         dp.add_handler(CommandHandler('users', self.cmd_users, filters=admin_filter))
+        dp.add_handler(CommandHandler('post_rules', self.cmd_post_rules, filters=admin_filter))
 
         # Moderation handlers (group 1 so they don't interfere with command handling)
         dp.add_handler(
@@ -265,6 +266,13 @@ class CurrencyBot:
 
     def cmd_users(self, update: Update, context: CallbackContext):
         update.message.reply_text(f"Пользователей: {len(self.users)}")
+
+    def cmd_post_rules(self, update: Update, context: CallbackContext):
+        success = self.moderation.send_welcome_rules_if_needed(context.bot, force=True)
+        if success:
+            update.message.reply_text("✅ Правила успешно опубликованы в топике «Обмен».")
+        else:
+            update.message.reply_text("⚠️ Ошибка публикации правил. Проверьте logs/moderation.log")
 
     def periodic_update(self):
         # Настройки "тишины"
@@ -352,10 +360,13 @@ class CurrencyBot:
             
             time.sleep(self.config['sleep_time'])
 
-    def run(self):
-        # Post rules welcome announcement if configured and not sent yet
+    def _delayed_welcome_rules(self):
+        time.sleep(3)
         self.moderation.send_welcome_rules_if_needed(self.updater.bot)
 
+    def run(self):
+        # Post rules in background after polling is initialized
+        threading.Thread(target=self._delayed_welcome_rules, daemon=True).start()
         threading.Thread(target=self.periodic_update, daemon=True).start()
         self.updater.start_polling()
         self.updater.idle()
