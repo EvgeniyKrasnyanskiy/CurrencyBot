@@ -11,8 +11,9 @@ import signal
 import subprocess
 import requests
 from datetime import datetime
+from typing import Optional
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackContext, Filters, MessageHandler
 from telegram.error import NetworkError, RetryAfter, TimedOut
 from moderation import ModerationManager
@@ -416,6 +417,66 @@ class CurrencyBot:
         time.sleep(3)
         self.moderation.send_welcome_rules_if_needed(self.updater.bot)
 
+    def send_channel_event(self, text: str):
+        """Send formatted service event message to the moderation log channel if configured."""
+        log_channel_id = self.moderation.config.log_channel_id
+        if not log_channel_id:
+            return
+
+        def _send():
+            try:
+                self.updater.bot.send_message(
+                    chat_id=log_channel_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отправить сервисное уведомление в канал логов: {e}")
+
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _delayed_startup_notification(self):
+        """Send bot startup notification to the moderation log channel after small delay."""
+        time.sleep(2)
+        commit = get_git_commit_hash()
+        pid = os.getpid()
+        mod_status = "Включена" if self.moderation.config.enabled else "Выключена"
+        text = (
+            f"🚀 <b>[СИСТЕМА: ЗАПУСК БОТА]</b>\n\n"
+            f"🏷 <b>Версия/Коммит:</b> <code>{commit}</code>\n"
+            f"🆔 <b>PID процесса:</b> <code>{pid}</code>\n"
+            f"💬 <b>Чат:</b> <code>{self.config['channel_id']}</code> | <b>Топик:</b> <code>{self.config['topic_id']}</code>\n"
+            f"🛡 <b>Модерация:</b> <code>{mod_status}</code>\n"
+            f"⚡️ <b>Действие:</b> <b>БОТ ОНЛАЙН</b>"
+        )
+        self.send_channel_event(text)
+
+    def send_shutdown_notification(self):
+        """Synchronously send shutdown notification before process exits."""
+        if getattr(self, "_shutdown_sent", False):
+            return
+        self._shutdown_sent = True
+        log_channel_id = self.moderation.config.log_channel_id
+        if not log_channel_id:
+            return
+        try:
+            pid = os.getpid()
+            text = (
+                f"🛑 <b>[СИСТЕМА: ОСТАНОВКА БОТА]</b>\n\n"
+                f"🆔 <b>PID процесса:</b> <code>{pid}</code>\n"
+                f"⚡️ <b>Действие:</b> <b>ОСТАНОВКА / ПЕРЕЗАПУСК</b>"
+            )
+            self.updater.bot.send_message(
+                chat_id=log_channel_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                timeout=5
+            )
+        except Exception as e:
+            logger.debug(f"Could not send shutdown notification: {e}")
+
     def run(self):
         commit = get_git_commit_hash()
         pid = os.getpid()
@@ -429,11 +490,17 @@ class CurrencyBot:
         logger.info("=" * 70)
         print(start_banner, flush=True)
 
+        # Notify log channel about successful startup
+        threading.Thread(target=self._delayed_startup_notification, daemon=True).start()
+
         # Post rules in background after polling is initialized
         threading.Thread(target=self._delayed_welcome_rules, daemon=True).start()
         threading.Thread(target=self.periodic_update, daemon=True).start()
         self.updater.start_polling()
         self.updater.idle()
+
+
+active_bot_instance: Optional[CurrencyBot] = None
 
 
 def get_git_commit_hash() -> str:
@@ -470,9 +537,12 @@ def create_lock():
 
 
 def handle_exit(signum, frame):
+    global active_bot_instance
     pid = os.getpid()
     logger.info(f"🛑 Received signal {signum}. Stopping CurrencyBot (PID {pid})...")
     print(f"\n🛑 Stopping CurrencyBot (PID {pid}, signal {signum})...", flush=True)
+    if active_bot_instance:
+        active_bot_instance.send_shutdown_notification()
     if os.path.exists(LOCK_FILE):
         try:
             os.remove(LOCK_FILE)
@@ -489,6 +559,7 @@ if __name__ == '__main__':
     create_lock()
     try:
         bot = CurrencyBot()
+        active_bot_instance = bot
         bot.run()
     except (KeyboardInterrupt, SystemExit):
         pass
@@ -496,6 +567,8 @@ if __name__ == '__main__':
         logger.error(f"💥 Unhandled fatal error: {e}", exc_info=True)
         print(f"💥 Fatal error: {e}", flush=True)
     finally:
+        if active_bot_instance:
+            active_bot_instance.send_shutdown_notification()
         if os.path.exists(LOCK_FILE):
             try:
                 os.remove(LOCK_FILE)

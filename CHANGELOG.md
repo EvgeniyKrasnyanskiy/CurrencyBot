@@ -31,5 +31,6 @@ All notable changes to this project will be documented in this file.
 - **Log Rotation & Lifecycle Events**:
   - Configured `RotatingFileHandler` for `logs/currency_bot.log` and `logs/moderation.log` (5 MB max per file, 3 backup archives) to prevent unlimited disk growth.
   - Added startup and shutdown banner logging with PID, git commit hash, and active configuration summary to both file logs and stdout/journalctl.
+  - Added live startup (`🚀 [СИСТЕМА: ЗАПУСК БОТА]`) and shutdown (`🛑 [СИСТЕМА: ОСТАНОВКА БОТА]`) notifications directly to the Telegram moderation log channel.
 - **Auto-Deployment**:
   - Added `scripts/auto_deploy.sh` for automated git-based deployments via cron or systemd on Debian/Linux servers.
