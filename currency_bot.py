@@ -7,6 +7,8 @@ from logging.handlers import RotatingFileHandler
 import threading
 import psutil
 import sys
+import signal
+import subprocess
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -415,11 +417,41 @@ class CurrencyBot:
         self.moderation.send_welcome_rules_if_needed(self.updater.bot)
 
     def run(self):
+        commit = get_git_commit_hash()
+        pid = os.getpid()
+        mod_status = "Enabled" if self.moderation.config.enabled else "Disabled"
+        start_banner = (
+            f"🚀 CurrencyBot started | PID: {pid} | Commit: {commit} | "
+            f"TargetChat: {self.config['channel_id']} | Topic: {self.config['topic_id']} | Moderation: {mod_status}"
+        )
+        logger.info("=" * 70)
+        logger.info(start_banner)
+        logger.info("=" * 70)
+        print(start_banner, flush=True)
+
         # Post rules in background after polling is initialized
         threading.Thread(target=self._delayed_welcome_rules, daemon=True).start()
         threading.Thread(target=self.periodic_update, daemon=True).start()
         self.updater.start_polling()
         self.updater.idle()
+
+
+def get_git_commit_hash() -> str:
+    """Safely retrieve short git commit hash or 'unknown'."""
+    try:
+        res = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
 
 def create_lock():
     if os.path.exists(LOCK_FILE):
@@ -427,18 +459,47 @@ def create_lock():
             with open(LOCK_FILE, 'r') as f:
                 pid = int(f.read().strip())
             if psutil.pid_exists(pid):
-                print(f"⚠️ Ошибка: Бот уже запущен (PID {pid}).")
+                print(f"⚠️ Ошибка: Бот уже запущен (PID {pid}).", flush=True)
                 sys.exit(1)
-            else: os.remove(LOCK_FILE)
-        except: os.remove(LOCK_FILE)
-    with open(LOCK_FILE, 'w') as f: f.write(str(os.getpid()))
+            else:
+                os.remove(LOCK_FILE)
+        except Exception:
+            os.remove(LOCK_FILE)
+    with open(LOCK_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+
+def handle_exit(signum, frame):
+    pid = os.getpid()
+    logger.info(f"🛑 Received signal {signum}. Stopping CurrencyBot (PID {pid})...")
+    print(f"\n🛑 Stopping CurrencyBot (PID {pid}, signal {signum})...", flush=True)
+    if os.path.exists(LOCK_FILE):
+        try:
+            os.remove(LOCK_FILE)
+        except Exception:
+            pass
+    sys.exit(0)
+
 
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, handle_exit)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, handle_exit)
+
     create_lock()
     try:
         bot = CurrencyBot()
         bot.run()
-    except KeyboardInterrupt:
-        print("\nБот остановлен.")
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    except Exception as e:
+        logger.error(f"💥 Unhandled fatal error: {e}", exc_info=True)
+        print(f"💥 Fatal error: {e}", flush=True)
     finally:
-        if os.path.exists(LOCK_FILE): os.remove(LOCK_FILE)
+        if os.path.exists(LOCK_FILE):
+            try:
+                os.remove(LOCK_FILE)
+            except Exception:
+                pass
+        logger.info(f"🛑 CurrencyBot (PID {os.getpid()}) shutdown complete.")
+        print(f"🛑 CurrencyBot (PID {os.getpid()}) shutdown complete.", flush=True)
