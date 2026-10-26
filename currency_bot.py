@@ -17,10 +17,16 @@ from moderation import ModerationManager
 load_dotenv()
 
 # --- CONFIG & PROXY ---
-PROXY_HOST = "127.0.0.1"
-PROXY_PORT = 10808
-REQUEST_KWARGS = {'proxy_url': f'http://{PROXY_HOST}:{PROXY_PORT}/', 'connect_timeout': 30, 'read_timeout': 30}
-PROXY_DICT = {"http": f"http://{PROXY_HOST}:{PROXY_PORT}", "https": f"http://{PROXY_HOST}:{PROXY_PORT}"}
+USE_PROXY = os.getenv("USE_PROXY", "false").lower() in ("true", "1", "yes")
+PROXY_HOST = os.getenv("PROXY_HOST", "127.0.0.1")
+PROXY_PORT = int(os.getenv("PROXY_PORT", "10808"))
+
+if USE_PROXY:
+    REQUEST_KWARGS = {'proxy_url': f'http://{PROXY_HOST}:{PROXY_PORT}/', 'connect_timeout': 30, 'read_timeout': 30}
+    PROXY_DICT = {"http": f"http://{PROXY_HOST}:{PROXY_PORT}", "https": f"http://{PROXY_HOST}:{PROXY_PORT}"}
+else:
+    REQUEST_KWARGS = {'connect_timeout': 30, 'read_timeout': 30}
+    PROXY_DICT = None
 
 LOCK_FILE = 'currency_bot.lock'
 
