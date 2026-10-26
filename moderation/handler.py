@@ -1,6 +1,6 @@
 """
 Main moderation handler orchestrating classification, warnings,
-delayed message deletion, rule announcements, and channel logging.
+delayed message deletion, rule announcements, and detailed channel logging.
 """
 import os
 import html
@@ -55,10 +55,14 @@ class ModerationManager:
 
     def send_log_to_channel(self, bot: Bot, log_type: str, user_title: str, user_id: int, category: str, reason: str, text: str, action: str):
         """
-        Send formatted moderation event log to configured Telegram channel with clear prefix.
+        Send formatted moderation event log to configured Telegram channel with rich prefix.
         log_type examples:
-          - "[МОДЕРАЦИЯ ТОПИКА «ОБМЕН»]"
-          - "[УДАЛЕНИЕ СООБЩЕНИЯ]"
+          - "🗑 [УДАЛЕНИЕ: СПАМ / МЕДИА]"
+          - "💬 [УДАЛЕНИЕ: ЧАТ / ОТВЕТ В ТЕМЕ]"
+          - "⏳ [УДАЛЕНИЕ: ЛИМИТ 2 В СУТКИ]"
+          - "✅ [ОБЪЯВЛЕНИЕ: ОПУБЛИКОВАНО]"
+          - "✏️ [ОБЪЯВЛЕНИЕ: ОТРЕДАКТИРОВАНО]"
+          - "📢 [ПРАВИЛА: ПУБЛИКАЦИЯ В ТОПИК]"
         """
         if not self.config.log_channel_id:
             return
@@ -71,7 +75,7 @@ class ModerationManager:
                 escaped_action = html.escape(action)
 
                 log_entry = (
-                    f"🛡 <b>{html.escape(log_type)}</b>\n\n"
+                    f"<b>{html.escape(log_type)}</b>\n\n"
                     f"👤 <b>Пользователь:</b> <a href=\"tg://user?id={user_id}\">{escaped_title}</a> (<code>{user_id}</code>)\n"
                     f"🏷 <b>Категория:</b> <code>{category}</code>\n"
                     f"📌 <b>Причина:</b> {escaped_reason}\n"
@@ -108,6 +112,16 @@ class ModerationManager:
             )
             self.storage.mark_welcome_sent(msg.message_id)
             mod_logger.info(f"Welcome rules message posted successfully. Message ID: {msg.message_id}")
+            self.send_log_to_channel(
+                bot,
+                log_type="📢 [ПРАВИЛА: ПУБЛИКАЦИЯ В ТОПИК]",
+                user_title="Бот",
+                user_id=bot.id,
+                category="RULES",
+                reason="Первоначальная публикация правил темы",
+                text=WELCOME_RULES_TEXT,
+                action="ОПУБЛИКОВАНО"
+            )
         except Exception as e:
             mod_logger.error(f"Failed to post welcome rules message: {e}")
 
@@ -196,25 +210,34 @@ class ModerationManager:
                         "Пожалуйста, отредактируйте ваши существующие объявления вместо создания новых."
                     )
                     category = CATEGORY_SPAM
-
-                if category == CATEGORY_EXCHANGE:
+                    log_type = "⏳ [УДАЛЕНИЕ: ЛИМИТ 2 В СУТКИ]"
+                else:
                     self.storage.register_ad(user_id, message_id, datetime.now().timestamp(), msg_text)
                     mod_logger.info(
                         f"ACCEPTED {category} | User: {user_id} | Msg: {message_id} | Reason: {reason}"
                     )
                     self.send_log_to_channel(
                         context.bot,
-                        log_type="[МОДЕРАЦИЯ ТОПИКА «ОБМЕН»]",
+                        log_type="✅ [ОБЪЯВЛЕНИЕ: ОПУБЛИКОВАНО]",
                         user_title=user_title,
                         user_id=user_id,
                         category=category,
                         reason=reason,
                         text=msg_text,
-                        action="✅ ОДОБРЕНО (Опубликовано)"
+                        action="ОДОБРЕНО"
                     )
                     return
 
         if category in (CATEGORY_SPAM, CATEGORY_CHAT):
+            # Select granular log prefix based on violation nature
+            if not locals().get("log_type"):
+                if category == CATEGORY_SPAM:
+                    log_type = "🗑 [УДАЛЕНИЕ: СПАМ / МЕДИА]"
+                elif message.reply_to_message:
+                    log_type = "💬 [УДАЛЕНИЕ: ЧАТ / ОТВЕТ В ТЕМЕ]"
+                else:
+                    log_type = "💬 [УДАЛЕНИЕ: НЕ ОБЪЯВЛЕНИЕ / ЧАТ]"
+
             delay = self.config.warning_delete_delay
             warning_text = (
                 f"⚠️ *В теме «Обмен» действуют правила модерации.*\n\n"
@@ -233,16 +256,15 @@ class ModerationManager:
             except Exception as e:
                 mod_logger.error(f"Failed to post warning reply to msg {message_id}: {e}")
 
-            action_desc = f"🗑 УДАЛЕНИЕ СООБЩЕНИЯ (через {delay}с)"
+            action_desc = f"УДАЛЕНИЕ (таймаут {delay}с)"
             mod_logger.info(
                 f"VIOLATION {category} | User: {user_id} | Msg: {message_id} | "
                 f"Reason: {reason} | WarningMsg: {warning_msg_id} | Scheduled delete in {delay}s"
             )
 
-            # Log violation and scheduled deletion with clear prefix
             self.send_log_to_channel(
                 context.bot,
-                log_type="[УДАЛЕНИЕ СООБЩЕНИЯ / МОДЕРАЦИЯ]",
+                log_type=log_type,
                 user_title=user_title,
                 user_id=user_id,
                 category=category,
@@ -271,4 +293,16 @@ class ModerationManager:
 
         new_text = (message.text or message.caption or "")
         self.storage.update_ad_text(user.id, message.message_id, new_text)
+        user_title = user.full_name or user.username or str(user.id)
         mod_logger.info(f"EDITED | User: {user.id} | Msg: {message.message_id} updated text.")
+
+        self.send_log_to_channel(
+            context.bot,
+            log_type="✏️ [ОБЪЯВЛЕНИЕ: ОТРЕДАКТИРОВАНО]",
+            user_title=user_title,
+            user_id=user.id,
+            category="EDIT",
+            reason="Пользователь обновил текст объявления",
+            text=new_text,
+            action="ОТРЕДАКТИРОВАНО"
+        )
