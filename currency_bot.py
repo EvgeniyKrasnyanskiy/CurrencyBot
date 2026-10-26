@@ -103,6 +103,32 @@ def save_bot_state(message_id):
     with open('data/bot_state.json', 'w') as f:
         json.dump({"last_message_id": message_id}, f)
 
+def load_rates_history():
+    if not os.path.exists('data/rates_history.json'):
+        return [], []
+    try:
+        with open('data/rates_history.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            now = time.time()
+            cutoff = now - 86400
+            history_r = [(float(t), float(p)) for t, p in data.get('history_r', []) if t > cutoff]
+            history_c = [(float(t), float(p)) for t, p in data.get('history_c', []) if t > cutoff]
+            return history_r, history_c
+    except Exception as e:
+        logger.error(f"Failed to load rates history: {e}")
+        return [], []
+
+def save_rates_history(history_r, history_c):
+    try:
+        os.makedirs('data', exist_ok=True)
+        with open('data/rates_history.json', 'w', encoding='utf-8') as f:
+            json.dump({
+                "history_r": history_r,
+                "history_c": history_c
+            }, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save rates history: {e}")
+
 
 # --- КОРНЕВАЯ ЛОГИКА КУРСОВ ---
 def get_all_rates(history_r, history_c):
@@ -134,20 +160,38 @@ def get_all_rates(history_r, history_c):
             usdt_Rapira_val = curr_r
 
             arrow = ""
-            if history_r:
-                # Стрелка (по сравнению с последним кэшем)
-                prev_r = history_r[-1][1]
-                if curr_r > prev_r:
-                    arrow = "⬈"
-                elif curr_r < prev_r:
-                    arrow = "⬊"
-                else:
-                    arrow = "→"
+            start_of_day_ms = int(start_of_day * 1000)
+            candle_today = next((c for c in data if c[0] >= start_of_day_ms), data[0])
+            first_today_rapira = float(candle_today[1])
 
-                # Процент за день (с 00:00)
+            # Стрелка (по сравнению с последней точкой в истории или предыдущей свечой)
+            if history_r:
+                prev_r = history_r[-1][1]
+            elif len(data) >= 2:
+                prev_r = float(data[-2][4])
+            else:
+                prev_r = curr_r
+
+            if curr_r > prev_r:
+                arrow = "⬈"
+            elif curr_r < prev_r:
+                arrow = "⬊"
+            else:
+                arrow = "→"
+
+            # Процент за день (с 00:00)
+            has_early_r = any(t <= start_of_day + 1800 for t, _ in history_r)
+            if history_r and has_early_r:
                 first_today = next((p for t, p in history_r if t >= start_of_day), history_r[0][1])
-                diff_pct = ((curr_r - first_today) / first_today) * 100
-                day_diff_r = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (Rap)"
+            else:
+                first_today = first_today_rapira
+
+            diff_pct = ((curr_r - first_today) / first_today) * 100
+            day_diff_r = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (Rap)"
+
+            # Если history_r был пуст (cold start), заполняем его свечами Rapira за 24ч
+            if not history_r:
+                history_r.extend([(c[0] / 1000.0, float(c[4])) for c in data])
 
             res_r = f"[{curr_r:.2f}{arrow}]({url_link_rapira})"
     except Exception as e:
@@ -155,15 +199,16 @@ def get_all_rates(history_r, history_c):
 
     # 2. CoinGecko
     try:
-        url_cg = "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub"
+        url_cg = "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub&include_24hr_change=true"
         r = requests.get(url_cg, headers=headers, timeout=10, proxies=PROXY_DICT)
         if r.status_code == 200:
-            curr_c = float(r.json()['tether']['rub'])
+            cg_data = r.json().get('tether', {})
+            curr_c = float(cg_data['rub'])
+            cg_change_24h = cg_data.get('rub_24h_change')
             usdt_CG_val = curr_c
 
             arrow = ""
             if history_c:
-                # Стрелка
                 prev_c = history_c[-1][1]
                 if curr_c > prev_c:
                     arrow = "⬈"
@@ -172,10 +217,31 @@ def get_all_rates(history_r, history_c):
                 else:
                     arrow = "→"
 
-                # Процент за день (с 00:00)
-                first_today = next((p for t, p in history_c if t >= start_of_day), history_c[0][1])
-                diff_pct = ((curr_c - first_today) / first_today) * 100
-                day_diff_c = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (CG)"
+                has_early_c = any(t <= start_of_day + 1800 for t, _ in history_c)
+                if has_early_c:
+                    first_today = next((p for t, p in history_c if t >= start_of_day), history_c[0][1])
+                    diff_pct = ((curr_c - first_today) / first_today) * 100
+                    day_diff_c = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (CG)"
+                elif cg_change_24h is not None:
+                    diff_pct = float(cg_change_24h)
+                    day_diff_c = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (CG)"
+                else:
+                    first_today = history_c[0][1]
+                    diff_pct = ((curr_c - first_today) / first_today) * 100
+                    day_diff_c = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (CG)"
+            else:
+                if cg_change_24h is not None:
+                    diff_pct = float(cg_change_24h)
+                    day_diff_c = f"{'+' if diff_pct > 0 else ''}{diff_pct:.2f}% (CG)"
+                    if diff_pct > 0:
+                        arrow = "⬈"
+                    elif diff_pct < 0:
+                        arrow = "⬊"
+                    else:
+                        arrow = "→"
+                    # Точка 24ч назад для начального контекста в истории
+                    base_price = curr_c / (1.0 + (diff_pct / 100.0))
+                    history_c.append((time.time() - 86400, base_price))
 
             res_c = f"[{curr_c:.2f}{arrow}]({url_link_cg})"
     except Exception as e:
@@ -184,8 +250,9 @@ def get_all_rates(history_r, history_c):
     # Формируем итоговое сообщение
     msg = rf"💵 USDt = ₽{res_r} | ₽{res_c} \[{timestamp}]"
 
-    if day_diff_r or day_diff_c:
-        msg += f"\n\n📈 {date_str}: {day_diff_r} | {day_diff_c}"
+    diff_parts = [p for p in (day_diff_r, day_diff_c) if p]
+    if diff_parts:
+        msg += f"\n\n📈 {date_str}: {' | '.join(diff_parts)}"
 
     return msg, usdt_Rapira_val, usdt_CG_val
 
@@ -201,8 +268,7 @@ class CurrencyBot:
         
         self.last_rates = ""
         self.last_update_time = 0
-        self.history_r = []
-        self.history_c = []
+        self.history_r, self.history_c = load_rates_history()
         self.sent_alerts = {}
         self.moderation = ModerationManager()
         
@@ -245,6 +311,8 @@ class CurrencyBot:
         if val_c:
             self.history_c.append((now, val_c))
             self.history_c = [(t, p) for t, p in self.history_c if t > now - 86400]
+
+        save_rates_history(self.history_r, self.history_c)
 
         self.last_rates = text
         self.last_update_time = now

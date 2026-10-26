@@ -34,3 +34,7 @@ All notable changes to this project will be documented in this file.
   - Added live startup (`🚀 [СИСТЕМА: ЗАПУСК БОТА]`) and shutdown (`🛑 [СИСТЕМА: ОСТАНОВКА БОТА]`) notifications directly to the Telegram moderation log channel.
 - **Auto-Deployment**:
   - Added `scripts/auto_deploy.sh` for automated git-based deployments via cron or systemd on Debian/Linux servers.
+- **Rate Delta Recovery & History Persistence**:
+  - Persisted 24-hour rate history across bot restarts in `data/rates_history.json`.
+  - Implemented cold-start delta calculation using Rapira 24h candle history (open price from 00:00) and CoinGecko `include_24hr_change=true`, ensuring the daily change line (`📈 DD.MM: +/-X.XX% (Rap) | +/-Y.YY% (CG)`) is always displayed right after a restart.
+  - Added unit test suite in `tests/test_rates.py`.
