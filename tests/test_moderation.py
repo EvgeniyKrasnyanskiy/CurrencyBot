@@ -47,7 +47,14 @@ class TestModerationClassifier(unittest.TestCase):
             "Продам эфир ETH 2.5 шт",
             "Куплю USDT за нал в СПБ",
             "Sell 5000 USDT for cash RUB",
-            "Куплю биткоин по хорошему курсу"
+            "Куплю биткоин по хорошему курсу",
+            "Продам 350usd по 82 на карту",
+            "Куплю 500$ за рубли Т-Банк",
+            "Продам 1000usdt по 95 на Сбер",
+            "Обменяю 200 eur на наличные",
+            "Куплю 0.5btc за нал",
+            "Продам 500 баксов за рубли",
+            "Куплю 100долларов по 80"
         ]
         for sample in valid_samples:
             msg = self._create_mock_message(text=sample)

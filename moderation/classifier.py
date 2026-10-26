@@ -15,10 +15,12 @@ CATEGORY_EXCHANGE_REPLY = "EXCHANGE_REPLY"
 CATEGORY_SPAM = "SPAM"
 CATEGORY_CHAT = "CHAT"
 
-# Regular expressions for crypto keywords
+# Regular expressions for crypto and major exchange currency keywords
+# Uses letter lookaround assertion to support attached amounts (e.g. 350usd, 1000usdt, 0.5btc, 500$, 200€)
 RE_CRYPTO = re.compile(
-    r'\b(usdt|tether|тезер|тэзер|btc|bitcoin|биткоин|биток|eth|ethereum|эфир|ether|'
-    r'ton|тон|sol|solana|солана|trx|tron|трон|bnb|xrp|usdc|крипт[а-я]*|crypto)\b',
+    r'(?<![a-zA-Zа-яА-ЯёЁ])(usdt|tether|тезер|тэзер|btc|bitcoin|биткоин|биток|eth|ethereum|эфир|ether|'
+    r'ton|тон|sol|solana|солана|trx|tron|трон|bnb|xrp|usdc|крипт[а-я]*|crypto|'
+    r'usd|доллар[а-я]*|бакс[а-я]*|\$|eur|евро|€)(?![a-zA-Zа-яА-ЯёЁ])',
     re.IGNORECASE
 )
 
@@ -29,15 +31,15 @@ RE_TRADE_ACTION = re.compile(
     re.IGNORECASE
 )
 
-# Fiat currencies, payment methods, cash
+# Fiat payment currencies, payment methods, and cash
 RE_FIAT = re.compile(
-    r'\b(rub|ruble|руб[а-я]*|₽|usd|доллар[а-я]*|бакс[а-я]*|\$|eur|евро|€|'
-    r'нал|наличк[а-я]*|безнал|сбер|сбербанк|тинькофф|т-банк|тбанк|альфа|сбп|карт[а-я]*|мир)\b',
+    r'(?<![a-zA-Zа-яА-ЯёЁ])(rub|ruble|руб[а-я]*|₽|'
+    r'нал|наличк[а-я]*|безнал|сбер|сбербанк|тинькофф|т-банк|тбанк|альфа|сбп|карт[а-я]*|мир)(?![a-zA-Zа-яА-ЯёЁ])',
     re.IGNORECASE
 )
 
-# Price / amounts indicators (numbers with optional decimals or currency symbols)
-RE_NUMBERS = re.compile(r'\b\d+(?:[.,]\d+)?\b')
+# Price / amounts indicators (numbers with optional decimals, supports attached currency like 350usd)
+RE_NUMBERS = re.compile(r'\d+(?:[.,]\d+)?')
 
 # Greetings and casual chat markers
 RE_CASUAL_CHAT = re.compile(
@@ -158,9 +160,9 @@ def classify_message(message: Message, bot_user_id: Optional[int] = None, allow_
         crypto_match = RE_CRYPTO.search(text).group(0).upper()
         return CATEGORY_EXCHANGE, f"Обнаружено объявление об обмене с упоминанием {crypto_match}"
 
-    # Action without crypto (e.g. "Куплю кофе", "Продам гараж", "Куплю билет")
+    # Action without crypto/currency (e.g. "Куплю кофе", "Продам гараж", "Куплю билет")
     if has_action and not has_crypto:
-        return CATEGORY_CHAT, "Сообщение не относится к криптовалютному обмену"
+        return CATEGORY_CHAT, "Сообщение не относится к криптовалютному или валютному обмену"
 
     # Ambiguous or non-crypto messages are deleted as CHAT in strict mode
-    return CATEGORY_CHAT, "В теме разрешены только текстовые объявления о покупке или продаже криптовалюты"
+    return CATEGORY_CHAT, "В теме разрешены только текстовые объявления о покупке или продаже криптовалюты и валюты"
