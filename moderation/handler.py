@@ -53,24 +53,30 @@ class ModerationManager:
         self.config = config or ModerationConfig()
         self.storage = storage or ModerationStorage()
 
-    def send_log_to_channel(self, bot: Bot, user_title: str, user_id: int, category: str, reason: str, text: str, action: str):
-        """Send formatted moderation event log to configured Telegram channel."""
+    def send_log_to_channel(self, bot: Bot, log_type: str, user_title: str, user_id: int, category: str, reason: str, text: str, action: str):
+        """
+        Send formatted moderation event log to configured Telegram channel with clear prefix.
+        log_type examples:
+          - "[МОДЕРАЦИЯ ТОПИКА «ОБМЕН»]"
+          - "[УДАЛЕНИЕ СООБЩЕНИЯ]"
+        """
         if not self.config.log_channel_id:
             return
 
         def _send():
             try:
-                escaped_text = html.escape(text[:300]) if text else "<i>[медиа или пусто]</i>"
+                escaped_text = html.escape(text[:350]) if text else "<i>[медиафайл / пусто]</i>"
                 escaped_title = html.escape(user_title)
                 escaped_reason = html.escape(reason)
+                escaped_action = html.escape(action)
 
                 log_entry = (
-                    f"🛡 <b>Модерация темы «Обмен»</b>\n\n"
+                    f"🛡 <b>{html.escape(log_type)}</b>\n\n"
                     f"👤 <b>Пользователь:</b> <a href=\"tg://user?id={user_id}\">{escaped_title}</a> (<code>{user_id}</code>)\n"
                     f"🏷 <b>Категория:</b> <code>{category}</code>\n"
                     f"📌 <b>Причина:</b> {escaped_reason}\n"
-                    f"⚡️ <b>Действие:</b> <code>{action}</code>\n\n"
-                    f"💬 <b>Текст:</b>\n<blockquote>{escaped_text}</blockquote>"
+                    f"⚡️ <b>Действие:</b> <b>{escaped_action}</b>\n\n"
+                    f"💬 <b>Текст сообщения:</b>\n<blockquote>{escaped_text}</blockquote>"
                 )
                 bot.send_message(
                     chat_id=self.config.log_channel_id,
@@ -197,12 +203,18 @@ class ModerationManager:
                         f"ACCEPTED {category} | User: {user_id} | Msg: {message_id} | Reason: {reason}"
                     )
                     self.send_log_to_channel(
-                        context.bot, user_title, user_id, category, reason, msg_text, "ОДОБРЕНО (Опубликовано)"
+                        context.bot,
+                        log_type="[МОДЕРАЦИЯ ТОПИКА «ОБМЕН»]",
+                        user_title=user_title,
+                        user_id=user_id,
+                        category=category,
+                        reason=reason,
+                        text=msg_text,
+                        action="✅ ОДОБРЕНО (Опубликовано)"
                     )
                     return
 
         if category in (CATEGORY_SPAM, CATEGORY_CHAT):
-            # Formulate warning message
             delay = self.config.warning_delete_delay
             warning_text = (
                 f"⚠️ *В теме «Обмен» действуют правила модерации.*\n\n"
@@ -221,14 +233,22 @@ class ModerationManager:
             except Exception as e:
                 mod_logger.error(f"Failed to post warning reply to msg {message_id}: {e}")
 
-            action_desc = f"УДАЛЕНО (таймаут {delay}с)"
+            action_desc = f"🗑 УДАЛЕНИЕ СООБЩЕНИЯ (через {delay}с)"
             mod_logger.info(
                 f"VIOLATION {category} | User: {user_id} | Msg: {message_id} | "
                 f"Reason: {reason} | WarningMsg: {warning_msg_id} | Scheduled delete in {delay}s"
             )
 
+            # Log violation and scheduled deletion with clear prefix
             self.send_log_to_channel(
-                context.bot, user_title, user_id, category, reason, msg_text, action_desc
+                context.bot,
+                log_type="[УДАЛЕНИЕ СООБЩЕНИЯ / МОДЕРАЦИЯ]",
+                user_title=user_title,
+                user_id=user_id,
+                category=category,
+                reason=reason,
+                text=msg_text,
+                action=action_desc
             )
 
             if warning_msg_id:
