@@ -3,6 +3,7 @@ import re
 import json
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 import threading
 import psutil
 import sys
@@ -46,10 +47,16 @@ ALERT_THRESHOLDS = {
     "24ч": 6.0
 }
 
-# Logging
-if not os.path.exists('logs'): os.makedirs('logs')
-logging.basicConfig(filename=os.path.join('logs', 'currency_bot.log'), level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s', encoding='utf-8')
+# Logging with automatic rotation (max 5MB per file, up to 3 archives)
+os.makedirs('logs', exist_ok=True)
+bot_log_handler = RotatingFileHandler(
+    os.path.join('logs', 'currency_bot.log'),
+    maxBytes=5 * 1024 * 1024,
+    backupCount=3,
+    encoding='utf-8'
+)
+bot_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.basicConfig(level=logging.INFO, handlers=[bot_log_handler])
 logger = logging.getLogger(__name__)
 
 # --- UTILS ---

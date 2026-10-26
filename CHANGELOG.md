@@ -26,3 +26,5 @@ All notable changes to this project will be documented in this file.
   - Implemented case-insensitive error detection for missing/deleted Telegram messages (`message to edit not found`).
   - Added immediate re-creation and pinning of the rate message upon detecting deletion, eliminating the 10-minute delay.
   - Added lookup for existing pinned bot message on startup to prevent duplicates.
+- **Log Rotation**:
+  - Configured `RotatingFileHandler` for `logs/currency_bot.log` and `logs/moderation.log` (5 MB max per file, 3 backup archives) to prevent unlimited disk growth.

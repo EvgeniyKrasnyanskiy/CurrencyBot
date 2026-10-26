@@ -5,6 +5,7 @@ delayed message deletion, rule announcements, and detailed channel logging.
 import os
 import html
 import logging
+from logging.handlers import RotatingFileHandler
 import threading
 from datetime import datetime
 from typing import Optional
@@ -21,12 +22,17 @@ from .classifier import (
     CATEGORY_CHAT
 )
 
-# Dedicated logger for moderation
+# Dedicated logger for moderation with automatic rotation (max 5MB per file, up to 3 archives)
 os.makedirs("logs", exist_ok=True)
 mod_logger = logging.getLogger("moderation")
 mod_logger.setLevel(logging.INFO)
 if not mod_logger.handlers:
-    fh = logging.FileHandler(os.path.join("logs", "moderation.log"), encoding="utf-8")
+    fh = RotatingFileHandler(
+        os.path.join("logs", "moderation.log"),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8"
+    )
     fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     mod_logger.addHandler(fh)
 
