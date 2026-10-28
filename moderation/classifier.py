@@ -18,9 +18,21 @@ CATEGORY_CHAT = "CHAT"
 # Regular expressions for crypto and major exchange currency keywords
 # Uses letter lookaround assertion to support attached amounts (e.g. 350usd, 1000usdt, 0.5btc, 500$, 200€)
 RE_CRYPTO = re.compile(
-    r'(?<![a-zA-Zа-яА-ЯёЁ])(usdt|tether|тезер|тэзер|btc|bitcoin|биткоин|биток|eth|ethereum|эфир|ether|'
-    r'ton|тон|sol|solana|солана|trx|tron|трон|bnb|xrp|usdc|крипт[а-я]*|crypto|'
-    r'usd|доллар[а-я]*|бакс[а-я]*|\$|eur|евро|€)(?![a-zA-Zа-яА-ЯёЁ])',
+    r'(?<![a-zA-Zа-яА-ЯёЁ])('
+    r'usdt|юсдт[а-я]*|усдт[а-я]*|tether|тезер[а-я]*|тэзер[а-я]*|тизер[а-я]*|usdc|юсдс|усдс|ст[еэ]йбл[а-я]*|dai|'
+    r'btc|bitcoin|биткоин[а-я]*|биток|битк[а-я]*|бтц|бтк|сатош[а-я]*|'
+    r'eth|ethereum|эфир[а-я]*|кефир[а-я]*|ether|эфириум[а-я]*|етх|итх|'
+    r'ton|тон[а-я]*|грам[а-я]*|gram|ноткоин[а-я]*|ноткойн[а-я]*|notcoin|'
+    r'sol|solana|солан[а-я]*|сол|'
+    r'xrp|хрп|рипл[а-я]*|риппл[а-я]*|ripple|'
+    r'bnb|бнб|бинанс|'
+    r'ltc|лтц|лайт[а-я]*|лайткоин[а-я]*|litecoin|'
+    r'trx|tron|трон[а-я]*|трх|'
+    r'doge|доги|доге|догикоин[а-я]*|дожкоин[а-я]*|dogecoin|'
+    r'avax|авакс|avalanche|кардано|cardano|полкадот|polkadot|'
+    r'крипт[а-я]*|crypto|'
+    r'usd|юсд|усд|доллар[а-я]*|бакс[а-я]*|зелен[а-я]*|\$|eur|евро|€'
+    r')(?![a-zA-Zа-яА-ЯёЁ])',
     re.IGNORECASE
 )
 

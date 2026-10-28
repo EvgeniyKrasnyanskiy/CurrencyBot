@@ -61,6 +61,33 @@ class TestModerationClassifier(unittest.TestCase):
             category, reason = classify_message(msg)
             self.assertEqual(category, CATEGORY_EXCHANGE, f"Failed for: {sample} (got {category}: {reason})")
 
+    def test_cyrillic_and_slang_crypto_announcements(self):
+        samples = [
+            "100 юсдт",
+            "100юсдт",
+            "Продам 500 юсдт по 96 на Сбер",
+            "Куплю 300усдт за наличные",
+            "100юсд за рубли",
+            "0.5бтц",
+            "Куплю битки по хорошему курсу",
+            "2кефира за нал",
+            "Продам кефир по рынку",
+            "500тон",
+            "1000грам",
+            "Продам ноткоин 50000 шт",
+            "10солан",
+            "Куплю 50бнб",
+            "Продам 1000доги",
+            "Обменяю 100 лайтов",
+            "Куплю 500 риппл за рубли",
+            "Продам 200 стейблов за нал",
+            "Куплю 500 зелени за рубли"
+        ]
+        for sample in samples:
+            msg = self._create_mock_message(text=sample)
+            category, reason = classify_message(msg)
+            self.assertEqual(category, CATEGORY_EXCHANGE, f"Failed for cyrillic/slang sample: {sample} (got {category}: {reason})")
+
     def test_non_crypto_casual_chat(self):
         chat_samples = [
             "Куплю кофе и булочку",
@@ -69,7 +96,11 @@ class TestModerationClassifier(unittest.TestCase):
             "Кто тут админ?",
             "Спасибо за помощь!",
             "Подскажите пожалуйста где найти информацию",
-            "Перевел 5000 рублей на карту"
+            "Перевел 5000 рублей на карту",
+            "Дай мне контакт админа",
+            "У меня нет нот для гитары",
+            "Посолил суп на кухне",
+            "Куплю 2 билета в кино"
         ]
         for sample in chat_samples:
             msg = self._create_mock_message(text=sample)

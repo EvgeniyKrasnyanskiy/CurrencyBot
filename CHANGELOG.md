@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased] - 2026-10-26
 
 ### Added
+- **Cyrillic & Slang Crypto Recognition**:
+  - Expanded `RE_CRYPTO` in `moderation/classifier.py` with Cyrillic transliterations and slang for top 10-20 cryptocurrencies:
+    - USDT / Stables: `юсдт`, `усдт`, `тизер`, `юсдс`, `усдс`, `ст[еэ]йбл`
+    - BTC: `бтц`, `бтк`, `биток`, `сатоши`
+    - ETH: `кефир`, `эфириум`, `етх`, `итх`
+    - TON: `тон`, `грам`, `ноткоин`
+    - Top alts: `солана/сол`, `рипл/хрп`, `бнб`, `лайт/лтц`, `трон/трх`, `доги`, `авакс`, `кардано`, `полкадот`
+    - Fiat: `юсд`, `усд`, `зелень`
+  - Fixed false-positive deletion of legitimate exchange ads written in Russian without switching keyboard layouts (e.g. `100 юсдт`, `100юсдт`, `0.5бтц`, `2кефира`, `500тон`).
+  - Added unit test cases to `tests/test_moderation.py`.
 - **Exchange Topic Moderation**:
   - Automatic moderation specifically for the target exchange topic (`TARGET_GROUP_ID` & `TARGET_THREAD_ID`).
   - Strict text classification (`EXCHANGE`, `SPAM`, `CHAT`).
